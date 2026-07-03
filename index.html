@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Proton Command Center</title>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+#verWarn{display:none;background:var(--danger);color:#fff;padding:9px 22px;font-size:13.5px;font-weight:600}
+#verWarn.show{display:block}
+.card.uninstalled img{filter:grayscale(1);opacity:.45}
+.card.uninstalled .meta b{color:var(--muted)}
+.installbtn{position:absolute;top:8px;right:8px;border-radius:8px;padding:6px 12px;
+  background:rgba(0,0,0,.7);border:1px solid var(--line);color:var(--ink);font-size:12px;
+  font-weight:600;z-index:2}
+.installbtn:hover{border-color:var(--dlss);color:var(--dlss)}
+:root{
+  --bg:#101418; --panel:#171d24; --panel2:#1e252e; --line:#2a333e;
+  --ink:#e8edf2; --muted:#8a97a6;
+  --launch:#4da3ff; --dlss:#76b900; --cache:#e8a33d; --compiled:#b07aff; --danger:#ff5d5d;
+  --radius:10px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--ink);font:15px/1.5 Inter,system-ui,sans-serif}
+h1,h2,h3,.tab,.chip,.btn{font-family:"Chakra Petch","Inter",sans-serif}
+code,.mono,textarea,input[type=text]{font-family:"JetBrains Mono",monospace}
+button{cursor:pointer;border:0;background:none;color:inherit;font:inherit}
+:focus-visible{outline:2px solid var(--launch);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+/* top bar */
+header{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:16px;
+  padding:14px 22px;background:rgba(16,20,24,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+header h1{font-size:17px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+header h1 span{color:var(--muted);font-weight:500}
+#search{flex:1;max-width:420px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--radius);padding:9px 14px;color:var(--ink);font-size:13.5px}
+#search::placeholder{color:var(--muted)}
+#steamState{margin-left:auto;font-size:12.5px;font-weight:600;letter-spacing:.04em;
+  padding:6px 12px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+#steamState.on{color:var(--cache);border-color:var(--cache)}
+#steamState.off{color:var(--dlss);border-color:var(--dlss)}
+
+/* game grid */
+main{padding:22px;max-width:1500px;margin:0 auto}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:16px}
+.card{position:relative;display:flex;cursor:pointer;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--radius);overflow:hidden;text-align:left;transition:transform .12s,border-color .12s}
+.card:hover{transform:translateY(-2px);border-color:var(--muted)}
+.playbtn{position:absolute;top:8px;right:8px;width:34px;height:34px;border-radius:50%;
+  background:rgba(0,0,0,.65);color:var(--dlss);font-size:13px;opacity:0;transition:opacity .12s;z-index:2}
+.card:hover .playbtn{opacity:1}
+@media (hover:none){.playbtn{opacity:1}}
+#dPlay{position:absolute;right:16px;bottom:16px;background:var(--dlss);color:#0c1403;
+  border-radius:8px;padding:9px 18px;font-weight:700;font-family:"Chakra Petch",sans-serif}
+.rail{width:6px;flex:none;display:flex;flex-direction:column}
+.rail i{flex:1;background:var(--line)}
+.rail i.launch.lit{background:var(--launch)}
+.rail i.dlss.lit{background:var(--dlss)}
+.rail i.cache.lit{background:var(--cache)}
+.rail i.compiled.lit{background:var(--compiled)}
+.btn.violet{background:var(--compiled);border-color:var(--compiled);color:#160a24}
+.chip.v{color:var(--compiled);border-color:var(--compiled)}
+#globalBar{height:4px;background:transparent;position:fixed;top:0;left:0;right:0;z-index:40}
+#globalBar i{display:block;height:100%;width:0;background:var(--compiled);transition:width .4s}
+.card .body{flex:1;min-width:0}
+.card img{display:block;width:100%;aspect-ratio:460/215;object-fit:cover;background:var(--panel2)}
+.card .meta{padding:10px 12px}
+.card .meta b{display:block;font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .meta small{color:var(--muted);font-size:12px}
+.legend{display:flex;gap:18px;margin:0 0 16px;color:var(--muted);font-size:12.5px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+.legend .l1 i{background:var(--launch)}.legend .l2 i{background:var(--dlss)}.legend .l3 i{background:var(--cache)}
+#empty{color:var(--muted);padding:60px 0;text-align:center}
+
+/* drawer */
+#overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);opacity:0;pointer-events:none;transition:opacity .15s;z-index:30}
+#overlay.open{opacity:1;pointer-events:auto}
+#drawer{position:fixed;top:0;right:0;bottom:0;height:100dvh;width:min(680px,100%);background:var(--panel);
+  border-left:1px solid var(--line);transform:translateX(102%);transition:transform .18s ease;z-index:31;
+  display:flex;flex-direction:column}
+#drawer.open{transform:none}
+body.locked{overflow:hidden}
+@media (max-width:700px){
+  #drawer .hero img{aspect-ratio:auto;height:150px}
+  #drawer .hero h2{font-size:18px;bottom:32px}
+}
+#drawer .hero{position:relative;flex:none}
+#drawer .hero img{display:block;width:100%;aspect-ratio:460/215;object-fit:cover;background:var(--panel2)}
+#drawer .hero .shade{position:absolute;inset:0;background:linear-gradient(180deg,transparent 30%,var(--panel))}
+#drawer .hero h2{position:absolute;left:20px;bottom:34px;font-size:22px;text-shadow:0 2px 8px #000}
+#drawer .hero small{position:absolute;left:20px;bottom:14px;color:var(--muted);font-size:12px}
+#closeBtn{position:absolute;top:12px;right:12px;width:34px;height:34px;border-radius:50%;
+  background:rgba(0,0,0,.55);font-size:16px;line-height:34px;text-align:center}
+.tabs{display:flex;border-bottom:1px solid var(--line);flex:none}
+.tab{flex:1;padding:12px;font-size:13px;font-weight:600;letter-spacing:.08em;color:var(--muted);
+  border-bottom:2px solid transparent}
+.tab.active[data-tab=launch]{color:var(--launch);border-color:var(--launch)}
+.tab.active[data-tab=dlss]{color:var(--dlss);border-color:var(--dlss)}
+.tab.active[data-tab=cache]{color:var(--cache);border-color:var(--cache)}
+.tab.active[data-tab=bench]{color:var(--compiled);border-color:var(--compiled)}
+.statgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.stat{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.stat small{display:block;color:var(--muted);font-size:11px;letter-spacing:.05em;text-transform:uppercase}
+.stat b{font-size:19px;font-family:"JetBrains Mono",monospace}
+.stat .delta{font-size:12px;margin-left:6px}
+.delta.up{color:var(--dlss)}.delta.down{color:var(--danger)}
+.spark{width:100%;height:64px;background:#0c1014;border:1px solid var(--line);border-radius:8px;margin-top:6px}
+.impbadge{display:inline-block;padding:6px 14px;border-radius:999px;border:1px solid var(--dlss);
+  color:var(--dlss);font-weight:600;font-size:14px;margin-bottom:14px}
+.impbadge.bad{border-color:var(--danger);color:var(--danger)}
+.pane{flex:1;overflow-y:auto;padding:20px;display:none;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.pane.active{display:block}
+
+/* shared controls */
+.section{margin-bottom:22px}
+.section h3{font-size:12.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+.btn{display:inline-block;padding:9px 16px;border-radius:8px;font-size:13px;font-weight:600;
+  letter-spacing:.03em;border:1px solid var(--line);background:var(--panel2);transition:filter .1s}
+.btn:hover{filter:brightness(1.2)}
+.btn.primary{background:var(--launch);border-color:var(--launch);color:#06121f}
+.btn.green{background:var(--dlss);border-color:var(--dlss);color:#0c1403}
+.btn.amber{background:var(--cache);border-color:var(--cache);color:#1d1403}
+.btn.danger{background:transparent;border-color:var(--danger);color:var(--danger)}
+.btn:disabled{opacity:.45;cursor:not-allowed;filter:none}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+select,input[type=text]{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+  padding:8px 12px;color:var(--ink);font-size:13px}
+textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--line);border-radius:8px;
+  padding:12px;color:var(--dlss);font-size:12.5px;line-height:1.6;resize:vertical}
+.note{font-size:12.5px;color:var(--muted);margin-top:8px}
+.warn{border:1px solid var(--cache);color:var(--cache);border-radius:8px;padding:10px 14px;
+  font-size:13px;margin-bottom:16px;display:none}
+.warn.show{display:block}
+.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--panel2);
+  border:1px solid var(--line);border-radius:8px;padding:11px 18px;font-size:13.5px;z-index:50;
+  opacity:0;transition:opacity .15s;pointer-events:none;max-width:90%}
+.toast.show{opacity:1}
+.toast.err{border-color:var(--danger);color:var(--danger)}
+
+/* toggles */
+.toggle{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:11px 0;border-bottom:1px solid var(--line)}
+.toggle:last-child{border-bottom:0}
+.toggle b{font-size:14px;font-weight:500}
+.toggle small{display:block;color:var(--muted);font-size:12px}
+.switch{position:relative;width:42px;height:23px;flex:none}
+.switch input{position:absolute;opacity:0;width:100%;height:100%;cursor:pointer;margin:0}
+.switch em{position:absolute;inset:0;border-radius:999px;background:var(--line);transition:background .12s}
+.switch em::after{content:"";position:absolute;top:3px;left:3px;width:17px;height:17px;border-radius:50%;
+  background:var(--ink);transition:transform .12s}
+.switch input:checked+em{background:var(--launch)}
+.switch input:checked+em::after{transform:translateX(19px)}
+.switch input:focus-visible+em{outline:2px solid var(--launch);outline-offset:2px}
+
+/* dlss + cache lists */
+.item{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:10px}
+.item .top{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap}
+.item .top b{font-size:14px}
+.chip{font-size:11.5px;font-weight:600;letter-spacing:.05em;padding:3px 9px;border-radius:999px;border:1px solid}
+.chip.g{color:var(--dlss);border-color:var(--dlss)}
+.chip.a{color:var(--cache);border-color:var(--cache)}
+.chip.m{color:var(--muted);border-color:var(--line)}
+.item .path{color:var(--muted);font-size:11.5px;word-break:break-all;margin-top:4px}
+.bar{height:6px;background:var(--line);border-radius:999px;overflow:hidden;margin-top:10px;display:none}
+.bar.show{display:block}
+.bar i{display:block;height:100%;width:0;background:var(--cache);transition:width .3s}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Proton <span>//</span> Command Center</h1>
+  <input id="search" type="text" placeholder="Search your library…" autocomplete="off">
+  <button class="btn violet" id="compileAll">Compile all</button>
+  <button class="btn" id="settingsBtn" aria-label="Settings" title="Settings">⚙</button>
+  <div id="steamState">checking…</div>
+</header>
+<div id="settingsPop" hidden style="position:fixed;top:62px;right:22px;z-index:45;background:var(--panel2);
+  border:1px solid var(--line);border-radius:var(--radius);padding:16px;width:min(360px,calc(100% - 44px))">
+  <h3 style="font-size:12.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px">SteamGridDB art</h3>
+  <p class="note" style="margin:0 0 10px">Missing artwork is fetched from SteamGridDB when you add a free API key
+    (steamgriddb.com → Profile → Preferences → API). Steam's own art needs no key.</p>
+  <div class="row">
+    <input type="text" id="sgdbKey" placeholder="SteamGridDB API key" style="flex:1">
+    <button class="btn primary" id="saveKey">Save</button>
+  </div>
+  <h3 style="font-size:12.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:16px 0 10px">Full Steam library</h3>
+  <p class="note" style="margin:0 0 10px">Add a free Steam Web API key (steamcommunity.com/dev/apikey) to show
+    everything you own — uninstalled games appear greyed out with an Install button.</p>
+  <div class="row">
+    <input type="text" id="steamKey" placeholder="Steam Web API key" style="flex:1">
+    <button class="btn primary" id="saveSteamKey">Save</button>
+  </div>
+  <p class="note" id="keyStatus" style="margin-top:8px"></p>
+  <div class="row" style="margin-top:10px">
+    <button class="btn" id="artReset">Clear art cache & re-fetch</button>
+  </div>
+</div>
+<div id="globalBar"><i></i></div>
+<div id="verWarn">Backend is running old code — run: <span class="mono">systemctl --user restart proton-command-center</span> then refresh.</div>
+
+<main>
+  <div class="legend">
+    <span class="l1"><i></i>Launch options set</span>
+    <span class="l2"><i></i>DLSS detected</span>
+    <span class="l3"><i></i>Shader cache present</span>
+    <span class="l4"><i style="background:var(--compiled)"></i>Shaders compiled</span>
+  </div>
+  <div id="grid"></div>
+  <div id="empty" hidden>No games found. Is Steam installed with at least one game?</div>
+</main>
+
+<div id="overlay"></div>
+<aside id="drawer" aria-label="Game settings">
+  <div class="hero">
+    <img id="dHero" alt="">
+    <div class="shade"></div>
+    <h2 id="dName"></h2>
+    <small id="dAppid" class="mono"></small>
+    <button id="closeBtn" aria-label="Close">✕</button>
+    <button id="dPlay">▶ Play</button>
+  </div>
+  <div class="tabs">
+    <button class="tab active" data-tab="launch">Launch</button>
+    <button class="tab" data-tab="dlss">DLSS</button>
+    <button class="tab" data-tab="cache">Shader cache</button>
+    <button class="tab" data-tab="bench">Benchmark</button>
+  </div>
+
+  <!-- LAUNCH -->
+  <div class="pane active" id="pane-launch">
+    <div class="warn" id="steamWarn">Steam is running — saving will close it cleanly first (it overwrites launch options on exit otherwise).</div>
+    <div class="section">
+      <h3>Compatibility tool (Proton)</h3>
+      <div class="row">
+        <select id="compatSel" style="flex:1"></select>
+        <button class="btn primary" id="compatSave">Apply</button>
+      </div>
+      <p class="note">Whatever's installed shows up here — Proton-CachyOS, GE-Proton, official builds.
+        Applying closes Steam cleanly if it's running (this lives in config.vdf).</p>
+    </div>
+    <div class="section">
+      <h3>Preset</h3>
+      <div class="row">
+        <select id="preset">
+          <option value="">— pick a starting point —</option>
+          <option value="cachyos">CachyOS baseline (Wayland · HDR · NTSync · game-performance)</option>
+          <option value="ue5">UE5 anti-stutter (NVAPI · NTSync · game-performance)</option>
+          <option value="ace">Anti-cheat spoof (STEAMDECK=1)</option>
+          <option value="clean">Minimal (%command% only)</option>
+        </select>
+      </div>
+    </div>
+    <div class="section">
+      <h3>Toggles</h3>
+      <div id="toggles"></div>
+    </div>
+    <div class="section">
+      <h3>DLSS render preset override</h3>
+      <div class="row">
+        <select id="dlssPreset">
+          <option value="">Off (game default)</option>
+          <option value="render_preset_k">Preset K</option>
+          <option value="render_preset_l">Preset L</option>
+          <option value="render_preset_m">Preset M</option>
+          <option value="render_preset_latest">Latest</option>
+        </select>
+      </div>
+    </div>
+    <div class="section">
+      <h3>Extra env vars / arguments</h3>
+      <div class="row" style="flex-direction:column;align-items:stretch">
+        <input type="text" id="extraEnv" placeholder="Extra env vars, e.g. DXVK_HUD=fps">
+        <input type="text" id="extraArgs" placeholder="Game arguments after %command%, e.g. -dx12">
+      </div>
+    </div>
+    <div class="section">
+      <h3>Launch string</h3>
+      <textarea id="launchStr" spellcheck="false"></textarea>
+      <p class="note">Edit freely — toggles rebuild it, manual edits stick until you change a toggle.</p>
+    </div>
+    <div class="row">
+      <button class="btn primary" id="saveLaunch">Save to Steam</button>
+      <button class="btn" id="copyLaunch">Copy</button>
+      <button class="btn" id="startSteam" hidden>Start Steam</button>
+    </div>
+  </div>
+
+  <!-- DLSS -->
+  <div class="pane" id="pane-dlss">
+    <div class="section">
+      <h3>DLLs in this game</h3>
+      <div id="dlssList"><p class="note">Scanning…</p></div>
+    </div>
+    <div class="section">
+      <h3>DLL library</h3>
+      <div id="dlssLib"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn green" data-dl="sr">Get latest Super Resolution</button>
+        <button class="btn green" data-dl="fg">Get latest Frame Generation</button>
+        <button class="btn green" data-dl="rr">Get latest Ray Reconstruction</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <input type="text" id="importPath" placeholder="/path/to/nvngx_dlssg.dll" style="flex:1">
+        <button class="btn" id="importBtn">Import file</button>
+      </div>
+      <p class="note">All three come straight from NVIDIA's official GitHub repos (DLSS + Streamline SDK).
+        Manual import below stays available as a fallback.</p>
+      <div class="bar" id="dlBar"><i></i></div>
+    </div>
+  </div>
+
+  <!-- CACHE -->
+  <div class="pane" id="pane-cache">
+    <div class="section">
+      <h3>Steam shader cache</h3>
+      <div id="cacheList"><p class="note">Checking…</p></div>
+    </div>
+    <div class="section">
+      <h3>Actions</h3>
+      <div class="row">
+        <button class="btn amber" id="precompileBtn">Precompile shaders (Fossilize)</button>
+        <button class="btn danger" id="clearCacheBtn">Clear compiled cache</button>
+        <button class="btn danger" id="clearAllBtn">Delete everything</button>
+      </div>
+      <p class="note">"Clear compiled cache" keeps the fozpipelinesv6 recordings — they're the
+        source data for precompiling. "Delete everything" removes those too.</p>
+      <div class="row" style="margin-top:10px">
+        <label class="note" for="devIdx">GPU device index</label>
+        <select id="devIdx"><option>0</option><option>1</option><option>2</option></select>
+      </div>
+      <p class="note">Device index 0 is usually the dGPU — same <code>--device-index</code> flag as Stutterless.</p>
+      <div class="bar" id="fozBar"><i></i></div>
+      <p class="note" id="fozDetail"></p>
+    </div>
+  </div>
+
+  <!-- BENCHMARK -->
+  <div class="pane" id="pane-bench">
+    <div class="section">
+      <h3>How it works</h3>
+      <p class="note" style="margin:0 0 10px">Save the benchmark launch options below, play for a few
+        minutes, precompile, play again — Command Center splits the MangoHud logs at your compile time
+        and compares 1% lows (the number shader stutter actually hurts).</p>
+      <div class="row">
+        <button class="btn violet" id="benchSave">Save benchmark launch options</button>
+        <button class="btn" id="benchCopy">Copy</button>
+      </div>
+      <textarea id="benchStr" spellcheck="false" readonly style="margin-top:10px;min-height:64px"></textarea>
+    </div>
+    <div class="section" id="benchResults"><p class="note">Loading…</p></div>
+    <div class="section">
+      <h3>Diagnostics</h3>
+      <div id="benchDiag" class="note"></div>
+    </div>
+  </div>
+</aside>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const FRONTEND_VERSION="1.1.0";
+const $=s=>document.querySelector(s);
+const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
+const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
+const vTup=v=>String(v||"0").split(".").map(n=>parseInt(n)||0);
+const vNewer=(a,b)=>{const x=vTup(a),y=vTup(b);for(let i=0;i<Math.max(x.length,y.length);i++){if((x[i]||0)>(y[i]||0))return true;if((x[i]||0)<(y[i]||0))return false}return false};
+const fShort=v=>{const p=String(v||"?").split(".");while(p.length>2&&p[p.length-1]==="0")p.pop();return p.join(".")};
+const fGen=v=>{const m=vTup(v)[0];return m>=310?"DLSS 4":m===3?"DLSS 3":m===2?"DLSS 2":"DLSS"};
+const fmtMB=b=>b>1073741824?(b/1073741824).toFixed(1)+" GB":(b/1048576).toFixed(0)+" MB";
+const esc=s=>s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let toastT;
+function toast(msg,err){const t=$("#toast");t.textContent=msg;t.className="toast show"+(err?" err":"");
+  clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove("show"),3500)}
+
+/* ---------- launch string builder ---------- */
+const TOGGLES=[
+ {id:"wayland",label:"Native Wayland",hint:"PROTON_ENABLE_WAYLAND=1",env:"PROTON_ENABLE_WAYLAND=1"},
+ {id:"hdr",label:"HDR",hint:"PROTON_ENABLE_HDR=1 DXVK_HDR=1 — disable the in-game HDR toggle if it conflicts",env:"PROTON_ENABLE_HDR=1 DXVK_HDR=1"},
+ {id:"ntsync",label:"NTSync",hint:"PROTON_USE_NTSYNC=1 — already default on Proton-CachyOS 11",env:"PROTON_USE_NTSYNC=1"},
+ {id:"nvapi",label:"NVAPI",hint:"PROTON_ENABLE_NVAPI=1 — needed for DLSS / Reflex in some titles",env:"PROTON_ENABLE_NVAPI=1"},
+ {id:"steamdeck",label:"Steam Deck spoof",hint:"STEAMDECK=1 — helps some anti-cheat (ACE) accept Linux",env:"STEAMDECK=1"},
+ {id:"mangohud",label:"MangoHud overlay",hint:"Adds the mangohud wrapper",wrap:"mangohud"},
+ {id:"gameperf",label:"game-performance",hint:"CachyOS power-profile wrapper",wrap:"game-performance"},
+];
+const PRESETS={
+ cachyos:{on:["wayland","hdr","ntsync","gameperf"],dlss:"render_preset_m"},
+ ue5:{on:["nvapi","ntsync","gameperf"],dlss:""},
+ ace:{on:["steamdeck"],dlss:""},
+ clean:{on:[],dlss:""},
+};
+let manualEdit=false;
+
+function renderToggles(){
+  $("#toggles").innerHTML=TOGGLES.map(t=>`
+    <div class="toggle">
+      <div><b>${t.label}</b><small>${t.hint}</small></div>
+      <label class="switch"><input type="checkbox" data-id="${t.id}"><em></em></label>
+    </div>`).join("");
+  $("#toggles").addEventListener("change",()=>{manualEdit=false;buildString()});
+}
+function buildString(){
+  if(manualEdit)return;
+  const on=new Set([...document.querySelectorAll("#toggles input:checked")].map(i=>i.dataset.id));
+  const env=[],wraps=[];
+  for(const t of TOGGLES){
+    if(!on.has(t.id))continue;
+    if(t.env)env.push(t.env);
+    if(t.wrap)wraps.push(t.wrap);
+  }
+  const p=$("#dlssPreset").value;
+  if(p)env.push("DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE=on",
+    "DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE_RENDER_PRESET_SELECTION="+p);
+  const extraEnv=$("#extraEnv").value.trim();
+  if(extraEnv)env.push(extraEnv);
+  const parts=[...env,...wraps,"%command%"];
+  const args=$("#extraArgs").value.trim();
+  if(args)parts.push(args);
+  $("#launchStr").value=parts.join(" ");
+}
+["#dlssPreset","#extraEnv","#extraArgs"].forEach(s=>$(s).addEventListener("input",()=>{manualEdit=false;buildString()}));
+$("#launchStr").addEventListener("input",()=>{manualEdit=true});
+$("#preset").addEventListener("change",e=>{
+  const p=PRESETS[e.target.value];if(!p)return;
+  document.querySelectorAll("#toggles input").forEach(i=>i.checked=p.on.includes(i.dataset.id));
+  $("#dlssPreset").value=p.dlss;manualEdit=false;buildString();
+});
+
+/* naive reverse-parse: light the toggles a saved string matches */
+function loadStringIntoUI(str){
+  document.querySelectorAll("#toggles input").forEach(i=>{
+    const t=TOGGLES.find(t=>t.id===i.dataset.id);
+    i.checked=!!(t.env&&t.env.split(" ").every(e=>str.includes(e))||t.wrap&&new RegExp("\\b"+t.wrap+"\\b").test(str));
+  });
+  const m=str.match(/RENDER_PRESET_SELECTION=(\S+)/);
+  $("#dlssPreset").value=m?m[1]:"";
+  $("#extraEnv").value="";$("#extraArgs").value="";
+  $("#launchStr").value=str;manualEdit=!!str;
+  if(!str){manualEdit=false;buildString()}
+}
+
+/* ---------- app state ---------- */
+let games=[],current=null,statusById={};
+
+function seedStatus(list){
+  list.forEach(g=>statusById[g.appid]={...statusById[g.appid],
+    launch:!!g.has_launch_options,dlss:!!g.has_dlss,cache:!!g.has_cache,
+    compiled:!!g.compiled,outdated:!!g.outdated,
+    installing:g.fully_installed===false,pct:g.download_pct});
+}
+let steamIsRunning=false;
+async function refreshStatus(){
+  try{
+    const s=await api("/api/status");
+    steamIsRunning=!!s.steam_running;
+    const el=$("#steamState");
+    el.textContent=steamIsRunning?"⬤ Steam running":"⬤ Steam closed";
+    el.className=steamIsRunning?"on":"off";
+    $("#steamWarn").classList.toggle("show",steamIsRunning);
+    $("#saveLaunch").textContent=steamIsRunning?"Close Steam & save":"Save to Steam";
+    $("#startSteam").hidden=steamIsRunning;
+    $("#verWarn").classList.toggle("show",!!s.version&&s.version!==FRONTEND_VERSION);
+    if(!s.version)$("#verWarn").classList.add("show");
+  }catch(e){}
+}
+setInterval(refreshStatus,5000);
+
+function railFor(g){
+  const st=statusById[g.appid]||{};
+  return `<div class="rail">
+    <i class="launch ${st.launch?"lit":""}"></i>
+    <i class="dlss ${st.dlss?"lit":""}"></i>
+    <i class="cache ${st.cache?"lit":""}"></i>
+    <i class="compiled ${st.compiled?"lit":""}"></i></div>`;
+}
+let ownedOnly=[];   // owned but not installed
+function renderGrid(filter=""){
+  const f=filter.toLowerCase();
+  const inst=games.filter(g=>g.name.toLowerCase().includes(f));
+  const notInst=ownedOnly.filter(g=>g.name.toLowerCase().includes(f));
+  const list=[...inst,...notInst.map(g=>({...g,_uninstalled:true}))];
+  $("#empty").hidden=list.length>0;
+  $("#grid").innerHTML=list.map(g=>`
+    <div class="card ${g._uninstalled?"uninstalled":""}" role="button" tabindex="0" data-appid="${g.appid}" ${g._uninstalled?'data-uninstalled="1"':""}>
+      ${railFor(g)}
+      <div class="body">
+        <img loading="lazy" src="https://cdn.cloudflare.steamstatic.com/steam/apps/${g.appid}/header.jpg"
+             data-appid="${g.appid}" data-fallback="0" alt="">
+        <div class="meta"><b>${esc(g.name)}</b><small>${g._uninstalled?"not installed":((statusById[g.appid]||{}).installing?("installing"+((statusById[g.appid]||{}).pct?" · "+(statusById[g.appid]||{}).pct+"%":"…")):(g.size_bytes?fmtMB(g.size_bytes):"—"))}</small></div>
+        ${g._uninstalled?`<button class="installbtn" data-install="${g.appid}">Install</button>`:`<button class="playbtn" data-play="${g.appid}" title="Play">▶</button>`}
+      </div>
+    </div>`).join("");
+}
+$("#search").addEventListener("input",e=>renderGrid(e.target.value));
+/* art fallback chain: Steam CDN -> SteamGridDB proxy -> generated placeholder */
+function artPlaceholder(appid){
+  const g=games.find(x=>x.appid===appid);
+  const initials=(g?g.name:"?").split(/\s+/).filter(w=>/^[A-Za-z0-9]/.test(w)).slice(0,3).map(w=>w[0].toUpperCase()).join("")||"?";
+  const svg=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 215">
+    <rect width="460" height="215" fill="#1e252e"/>
+    <text x="230" y="128" text-anchor="middle" font-family="sans-serif" font-size="64"
+      font-weight="700" fill="#2f3946">${initials}</text></svg>`;
+  return "data:image/svg+xml;charset=utf-8,"+encodeURIComponent(svg);
+}
+document.addEventListener("error",e=>{
+  const img=e.target;
+  if(img.tagName!=="IMG"||!img.dataset.appid)return;
+  if(img.dataset.fallback==="0"){
+    img.dataset.fallback="1";
+    const g=games.find(x=>x.appid===img.dataset.appid);
+    img.src="/api/art/"+img.dataset.appid+(g?"?name="+encodeURIComponent(g.name):"");
+  }
+  else if(img.dataset.fallback==="1"){img.dataset.fallback="2";img.src=artPlaceholder(img.dataset.appid)}
+},true);
+$("#grid").addEventListener("keydown",e=>{
+  if((e.key==="Enter"||e.key===" ")&&e.target.classList.contains("card")){
+    e.preventDefault();e.target.click();
+  }
+});
+$("#grid").addEventListener("click",e=>{
+  const p=e.target.closest(".playbtn");
+  if(p){e.stopPropagation();playGame(p.dataset.play);return}
+  const ib=e.target.closest(".installbtn");
+  if(ib){e.stopPropagation();installGame(ib.dataset.install);return}
+  const c=e.target.closest(".card");
+  if(!c)return;
+  if(c.dataset.uninstalled){
+    const g=ownedOnly.find(x=>x.appid===c.dataset.appid);
+    if(confirm(`Install ${g?g.name:"this game"} now?\n\nSteam will download it in the background — the game gets its full card here once it's installed.`))
+      installGame(c.dataset.appid);
+    return;
+  }
+  openGame(c.dataset.appid);
+});
+
+/* ---------- drawer ---------- */
+function switchTab(name){
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===name));
+  document.querySelectorAll(".pane").forEach(p=>p.classList.toggle("active",p.id==="pane-"+name));
+}
+document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>switchTab(t.dataset.tab)));
+function closeDrawer(){$("#drawer").classList.remove("open");$("#overlay").classList.remove("open");
+  document.body.classList.remove("locked")}
+window.addEventListener("error",e=>{
+  // resource load failures have no message — the art fallback chain handles those.
+  // Errors from browser extensions (plasma-integration etc.) carry a foreign
+  // filename — not ours to report. Surface only our own script errors, once each.
+  if(!e.message||e.message==="Script error.")return;
+  if(e.filename&&!e.filename.startsWith(location.origin))return;
+  if(window._lastErr===e.message)return;
+  window._lastErr=e.message;
+  toast("UI error: "+e.message,true);
+});
+$("#overlay").addEventListener("click",closeDrawer);
+$("#closeBtn").addEventListener("click",closeDrawer);
+document.addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer()});
+
+async function openGame(appid){
+  current=games.find(g=>g.appid===appid);if(!current)return;
+  $("#dName").textContent=current.name;
+  $("#dAppid").textContent="appid "+appid;
+  $("#dHero").dataset.appid=appid;$("#dHero").dataset.fallback="0";$("#dHero").style.opacity="";
+  $("#dHero").src=`https://cdn.cloudflare.steamstatic.com/steam/apps/${appid}/header.jpg`;
+  switchTab("launch");
+  $("#drawer").classList.add("open");$("#overlay").classList.add("open");
+  document.body.classList.add("locked");
+  $("#dlssList").innerHTML='<p class="note">Scanning game folder…</p>';
+  $("#cacheList").innerHTML='<p class="note">Checking…</p>';
+  try{
+    const lo=await api(`/api/game/${appid}/launch_options`);
+    loadStringIntoUI(lo.value||"");
+    statusById[appid]={...statusById[appid],launch:!!lo.value};
+  }catch(e){loadStringIntoUI("")}
+  loadLibrary().then(()=>loadDLSS(appid));loadCache(appid);loadBench(appid);loadCompat(appid);
+}
+
+async function loadDLSS(appid){
+  try{
+    const d=await api(`/api/game/${appid}/dlss`);
+    statusById[appid]={...statusById[appid],dlss:d.dlls.length>0};
+    renderGrid($("#search").value);
+    if(!d.dlls.length){$("#dlssList").innerHTML='<p class="note">No DLSS DLLs found in this game.</p>';return}
+    $("#dlssList").innerHTML=d.dlls.map((dll,i)=>{
+      const newest=libDlls.filter(x=>x.kind===dll.kind).sort((a,b)=>vNewer(a.version,b.version)?-1:1)[0];
+      const upd=newest&&vNewer(newest.version,dll.version);
+      return `
+      <div class="item">
+        <div class="top"><b>${dll.label}</b>
+          <span class="chip g">${fGen(dll.version)} · ${fShort(dll.version)}</span>
+          ${upd?`<span class="chip a">update available · ${fShort(newest.version)}</span>`:""}
+          ${dll.backed_up?'<span class="chip m">backup saved</span>':""}
+        </div>
+        <div class="path mono">${esc(dll.path)}</div>
+        <div class="row" style="margin-top:10px">
+          ${upd?`<button class="btn amber" data-update="${i}" data-lib="${esc(newest.path)}">Update to ${fShort(newest.version)}</button>`:""}
+          <select data-swap="${i}" class="swapSel"></select>
+          <button class="btn green" data-doswap="${i}">Swap</button>
+          ${dll.backed_up?`<button class="btn" data-restore="${i}">Restore original</button>`:""}
+        </div>
+      </div>`}).join("");
+    window._gameDlls=d.dlls;
+    fillSwapSelects();
+    $("#dlssList").onclick=async e=>{
+      const s=e.target.dataset.doswap,r=e.target.dataset.restore,u=e.target.dataset.update;
+      if(u!==undefined){
+        try{
+          const res=await post("/api/dlss/swap",{game_dll:window._gameDlls[u].path,library_dll:e.target.dataset.lib});
+          toast("Updated to "+fGen(res.new_version)+" "+fShort(res.new_version));loadDLSS(appid);
+        }catch(err){toast(err.message,true)}
+        return;
+      }
+      try{
+        if(s!==undefined){
+          const sel=document.querySelector(`select[data-swap="${s}"]`);
+          if(!sel.value)return toast("Pick a library version first",true);
+          const res=await post("/api/dlss/swap",{game_dll:window._gameDlls[s].path,library_dll:sel.value});
+          toast("Swapped — now v"+res.new_version);loadDLSS(appid);
+        }else if(r!==undefined){
+          const res=await post("/api/dlss/restore",{game_dll:window._gameDlls[r].path});
+          toast("Restored v"+res.version);loadDLSS(appid);
+        }
+      }catch(err){toast(err.message,true)}
+    };
+  }catch(e){$("#dlssList").innerHTML=`<p class="note">Scan failed: ${esc(e.message)}</p>`}
+}
+
+let libDlls=[];
+async function loadLibrary(){
+  try{
+    const d=await api("/api/dlss/library");libDlls=d.dlls;
+    $("#dlssLib").innerHTML=d.dlls.length?d.dlls.map(x=>`
+      <div class="item"><div class="top"><b class="mono">${esc(x.name)}</b>
+        <span class="chip g">${fGen(x.version)} · ${fShort(x.version)}</span></div></div>`).join("")
+      :'<p class="note">Library is empty — download or import a DLL below.</p>';
+    fillSwapSelects();
+  }catch(e){}
+}
+function fillSwapSelects(){
+  document.querySelectorAll(".swapSel").forEach(sel=>{
+    const dll=window._gameDlls?.[sel.dataset.swap];if(!dll)return;
+    const opts=libDlls.filter(x=>x.kind===dll.kind);
+    sel.innerHTML='<option value="">— library version —</option>'+
+      opts.map(o=>`<option value="${esc(o.path)}">${fGen(o.version)} · ${fShort(o.version)}</option>`).join("");
+  });
+}
+document.querySelectorAll("[data-dl]").forEach(btn=>btn.addEventListener("click",async()=>{
+  try{
+    const {task}=await post("/api/dlss/download",{kind:btn.dataset.dl});
+    btn.disabled=true;
+    trackTask(task,"#dlBar",()=>{btn.disabled=false;toast("Added to library");loadLibrary();if(current)loadDLSS(current.appid)});
+    setTimeout(()=>btn.disabled=false,120000);
+  }catch(e){toast(e.message,true);btn.disabled=false}
+}));
+$("#importBtn").addEventListener("click",async()=>{
+  try{
+    const r=await post("/api/dlss/import",{path:$("#importPath").value});
+    toast(`Imported ${r.kind.toUpperCase()} v${r.version}`);$("#importPath").value="";loadLibrary();
+  }catch(e){toast(e.message,true)}
+});
+
+async function loadCache(appid){
+  try{
+    const d=await api(`/api/game/${appid}/cache`);
+    statusById[appid]={...statusById[appid],cache:d.caches.length>0,compiled:!!(d.status&&d.status.compiled)};
+    renderGrid($("#search").value);
+    const st=d.status||{};
+    const banner=st.compiled&&st.outdated
+      ?`<div class="item"><div class="top"><b>Compiled — recompile recommended</b><span class="chip a">new pipeline data since compile</span></div>
+         <div class="path">Steam collected new shader pipelines since your last compile. The compiled status is kept; run precompile to cover the new ones.</div></div>`
+      :st.compiled
+      ?`<div class="item"><div class="top"><b>Shaders compiled</b><span class="chip v">driver ${esc(st.driver||"?")}</span></div>
+         <div class="path">Compiled ${st.compiled_at?new Date(st.compiled_at*1000).toLocaleString():""} — status persists across restarts and resets automatically if the pipeline files or driver change.</div></div>`
+      :(st.stale_reason?`<div class="item"><div class="top"><b>Not compiled</b><span class="chip m">${esc(st.stale_reason)}</span></div></div>`:"");
+    $("#cacheList").innerHTML=banner+(d.caches.length?d.caches.map(c=>`
+      <div class="item">
+        <div class="top"><b>${fmtMB(c.size_bytes)}</b>
+          <span class="chip a">${c.files} files</span>
+          <span class="chip ${c.foz.length?"a":"m"}">${c.foz.length} .foz pipelines</span></div>
+        <div class="path mono">${esc(c.path)}</div>
+      </div>`).join("")
+      :'<p class="note">No shader cache yet — launch the game once from Steam.</p>');
+  }catch(e){$("#cacheList").innerHTML=`<p class="note">${esc(e.message)}</p>`}
+}
+$("#clearCacheBtn").addEventListener("click",async()=>{
+  if(!current)return;
+  if(!confirm(`Clear the compiled shader cache for ${current.name}? The fozpipelinesv6 recordings are kept, so you can precompile again immediately.`))return;
+  try{
+    const r=await post(`/api/game/${current.appid}/cache/clear`,{keep_recordings:true});
+    toast(r.cleared.length?`Compiled cache cleared (${r.kept_recordings} recordings kept)`:"Nothing to clear");
+    loadCache(current.appid);
+  }catch(e){toast(e.message,true)}
+});
+$("#clearAllBtn").addEventListener("click",async()=>{
+  if(!current)return;
+  if(!confirm(`Delete ALL shader cache data for ${current.name}, including the foz recordings? Steam will need to re-collect them before you can precompile.`))return;
+  try{
+    const r=await post(`/api/game/${current.appid}/cache/clear`,{keep_recordings:false});
+    toast(r.cleared.length?"Everything deleted":"Nothing to delete");
+    loadCache(current.appid);
+  }catch(e){toast(e.message,true)}
+});
+$("#precompileBtn").addEventListener("click",async()=>{
+  if(!current)return;
+  try{
+    const {task}=await post(`/api/game/${current.appid}/cache/precompile`,
+      {device_index:+$("#devIdx").value});
+    trackTask(task,"#fozBar",()=>{toast("Precompile finished");loadCache(current.appid)},"#fozDetail");
+  }catch(e){toast(e.message,true)}
+});
+
+function trackTask(id,barSel,onDone,detailSel){
+  const bar=$(barSel);bar.classList.add("show");bar.querySelector("i").style.width="0%";
+  const iv=setInterval(async()=>{
+    try{
+      const t=await api("/api/tasks/"+id);
+      bar.querySelector("i").style.width=(t.progress||0)+"%";
+      if(detailSel)$(detailSel).textContent=t.detail||"";
+      if(t.status==="done"){clearInterval(iv);bar.classList.remove("show");onDone&&onDone()}
+      if(t.status==="error"){clearInterval(iv);bar.classList.remove("show");toast(t.detail,true)}
+    }catch(e){clearInterval(iv)}
+  },800);
+}
+
+/* ---------- owned library ---------- */
+async function installGame(appid){
+  try{
+    await post(`/api/game/${appid}/install`);
+    const g=ownedOnly.find(x=>x.appid===appid);
+    toast("Install started in Steam"+(g?" — "+g.name:""));
+  }catch(e){toast(e.message,true)}
+}
+async function loadOwned(){
+  try{
+    const d=await api("/api/owned_games");
+    const installed=new Set(games.map(g=>g.appid));
+    ownedOnly=d.games.filter(g=>!installed.has(g.appid));
+    renderGrid($("#search").value);
+  }catch(e){/* no key set — installed-only view */}
+}
+
+/* ---------- play / compat ---------- */
+async function playGame(appid){
+  try{await post(`/api/game/${appid}/launch`);
+    const g=games.find(x=>x.appid===appid);
+    toast("Launching "+(g?g.name:"game")+"…");}
+  catch(e){toast(e.message,true)}
+}
+$("#dPlay").addEventListener("click",()=>{if(current)playGame(current.appid)});
+let compatTools=null;
+async function loadCompat(appid){
+  try{
+    if(!compatTools)compatTools=(await api("/api/compat_tools")).tools;
+    const cur=await api(`/api/game/${appid}/compat_tool`);
+    $("#compatSel").innerHTML=compatTools.map(t=>
+      `<option value="${esc(t.name)}" ${t.name===cur.name?"selected":""}>${esc(t.label)}${t.custom?" ★":""}</option>`).join("");
+  }catch(e){$("#compatSel").innerHTML='<option value="">Steam default</option>'}
+}
+$("#compatSave").addEventListener("click",async()=>{
+  if(!current)return;
+  if(steamIsRunning&&!confirm("Steam will be closed cleanly to change the compatibility tool. Continue?"))return;
+  try{
+    await post(`/api/game/${current.appid}/compat_tool`,{name:$("#compatSel").value,close_steam:true});
+    toast("Compatibility tool applied");refreshStatus();
+  }catch(e){toast(e.message,true)}
+});
+
+/* ---------- settings ---------- */
+$("#settingsBtn").addEventListener("click",async()=>{
+  const pop=$("#settingsPop");pop.hidden=!pop.hidden;
+  if(!pop.hidden){
+    try{const s=await api("/api/settings");
+      $("#keyStatus").textContent=s.sgdb_api_key_set?`Key saved (${s.sgdb_api_key_hint})`:"No key set — Steam CDN art only";
+    }catch(e){}
+  }
+});
+$("#saveKey").addEventListener("click",async()=>{
+  try{
+    await post("/api/settings",{sgdb_api_key:$("#sgdbKey").value});
+    $("#sgdbKey").value="";
+    $("#keyStatus").textContent="Saved — missing art will use SteamGridDB from now on";
+    toast("SteamGridDB key saved");
+  }catch(e){toast(e.message,true)}
+});
+$("#saveSteamKey").addEventListener("click",async()=>{
+  try{
+    await post("/api/settings",{steam_api_key:$("#steamKey").value});
+    $("#steamKey").value="";
+    toast("Steam key saved — loading your library");
+    loadOwned();
+  }catch(e){toast(e.message,true)}
+});
+$("#artReset").addEventListener("click",async()=>{
+  try{
+    const r=await post("/api/art/reset");
+    toast(`Art cache cleared (${r.cleared} files) — re-fetching`);
+    renderGrid($("#search").value);   // fresh imgs restart the fallback chain
+  }catch(e){toast(e.message,true)}
+});
+document.addEventListener("click",e=>{
+  if(!e.target.closest("#settingsPop")&&!e.target.closest("#settingsBtn"))$("#settingsPop").hidden=true;
+});
+
+/* ---------- compile all ---------- */
+$("#compileAll").addEventListener("click",async()=>{
+  const btn=$("#compileAll");btn.disabled=true;
+  try{
+    const {task}=await post("/api/precompile_all",{device_index:0,skip_compiled:true});
+    const bar=$("#globalBar i");
+    const iv=setInterval(async()=>{
+      try{
+        const t=await api("/api/tasks/"+task);
+        bar.style.width=(t.progress||0)+"%";
+        if(t.detail)btn.textContent=t.detail.length>40?t.detail.slice(0,40)+"…":t.detail;
+        if(t.status==="done"||t.status==="error"){
+          clearInterval(iv);bar.style.width="0%";btn.disabled=false;btn.textContent="Compile all";
+          toast(t.detail,t.status==="error");
+          const d=await api("/api/games");
+          games=d.games.filter(g=>g.installed);
+          seedStatus(games);
+          renderGrid($("#search").value);
+        }
+      }catch(e){clearInterval(iv);btn.disabled=false;btn.textContent="Compile all"}
+    },1000);
+  }catch(e){toast(e.message,true);btn.disabled=false}
+});
+
+/* ---------- benchmark ---------- */
+function spark(points,color){
+  if(!points||!points.length)return "";
+  const w=560,h=60,max=Math.max(...points),min=Math.min(...points);
+  const pts=points.map((p,i)=>`${(i/(points.length-1)*w).toFixed(1)},${(h-4-(p-min)/((max-min)||1)*(h-8)).toFixed(1)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5"/></svg>`;
+}
+function statBlock(title,an,graph,color,other){
+  if(!an)return `<div class="item"><div class="top"><b>${title}</b><span class="chip m">no run yet</span></div></div>`;
+  const d=(k,inv)=>{ if(!other)return "";
+    const diff=an[k]-other[k];const good=inv?diff<0:diff>0;
+    return `<span class="delta ${good?"up":"down"}">${diff>0?"+":""}${Math.round(diff*10)/10}</span>`};
+  return `<div class="item"><div class="top"><b>${title}</b><span class="chip m">${an.frames} frames</span></div>
+    <div class="statgrid" style="margin-top:10px">
+      <div class="stat"><small>Avg FPS</small><b>${an.avg_fps}</b>${title==="After"?d("avg_fps"):""}</div>
+      <div class="stat"><small>1% low</small><b>${an.low1_fps}</b>${title==="After"?d("low1_fps"):""}</div>
+      <div class="stat"><small>0.1% low</small><b>${an.low01_fps}</b>${title==="After"?d("low01_fps"):""}</div>
+      <div class="stat"><small>Stutters</small><b>${an.stutter_pct}%</b>${title==="After"?d("stutter_pct",true):""}</div>
+    </div>${spark(graph,color)}</div>`;
+}
+async function loadBench(appid){
+  $("#benchResults").innerHTML='<p class="note">Loading…</p>';
+  try{
+    const d=await api(`/api/game/${appid}/benchmark`);
+    $("#benchStr").value=d.launch_string;
+    let out="";
+    if(!d.has_mangohud)out+='<div class="item"><div class="top"><b>MangoHud not installed</b><span class="chip a">sudo pacman -S mangohud</span></div></div>';
+    if(d.improvement_pct!==null){
+      const good=d.improvement_pct>=0;
+      out+=`<span class="impbadge ${good?"":"bad"}">1% lows ${good?"+":""}${d.improvement_pct}% after compiling</span>`;
+    }
+    out+=statBlock("Before",d.before,d.before_graph,"var(--danger)");
+    out+=statBlock("After",d.after,d.after_graph,"var(--dlss)",d.before);
+    $("#benchResults").innerHTML=out||'<p class="note">No data yet.</p>';
+    $("#benchDiag").innerHTML=(d.diag||[]).map(esc).join("<br>");
+  }catch(e){$("#benchResults").innerHTML=`<p class="note">${esc(e.message)}</p>`}
+}
+$("#benchCopy").addEventListener("click",()=>navigator.clipboard.writeText($("#benchStr").value).then(()=>toast("Copied")));
+$("#benchSave").addEventListener("click",async()=>{
+  if(!current)return;
+  if(steamIsRunning&&!confirm("Steam will be closed cleanly to save the benchmark launch options. Continue?"))return;
+  try{
+    await post(`/api/game/${current.appid}/launch_options`,{value:$("#benchStr").value,close_steam:true});
+    toast("Benchmark launch options saved — start Steam and play a few minutes");
+    refreshStatus();
+  }catch(e){toast(e.message,true)}
+});
+
+/* ---------- save / copy ---------- */
+$("#saveLaunch").addEventListener("click",async()=>{
+  if(!current)return;
+  const btn=$("#saveLaunch");
+  if(steamIsRunning&&!confirm("Steam will be closed cleanly so the change can be saved, then you can restart it with one click. Continue?"))return;
+  btn.disabled=true;
+  if(steamIsRunning)btn.textContent="Closing Steam…";
+  try{
+    const r=await post(`/api/game/${current.appid}/launch_options`,
+      {value:$("#launchStr").value,close_steam:true});
+    toast("Saved — backup at "+r.backup.split("/").pop());
+    statusById[current.appid]={...statusById[current.appid],launch:!!$("#launchStr").value.trim()};
+    renderGrid($("#search").value);
+  }catch(e){toast(e.message,true)}
+  btn.disabled=false;
+  refreshStatus();
+});
+$("#startSteam").addEventListener("click",async()=>{
+  try{await post("/api/steam/launch");toast("Starting Steam…");setTimeout(refreshStatus,3000)}
+  catch(e){toast(e.message,true)}
+});
+$("#copyLaunch").addEventListener("click",()=>{
+  navigator.clipboard.writeText($("#launchStr").value).then(()=>toast("Copied"));
+});
+
+/* ---------- boot ---------- */
+(async function(){
+  renderToggles();
+  refreshStatus();
+  try{
+    const d=await api("/api/games");
+    games=d.games.filter(g=>g.installed);
+    seedStatus(games);
+    renderGrid();
+    loadOwned();
+  }catch(e){
+    $("#empty").hidden=false;
+    $("#empty").textContent="Backend error: "+e.message;
+  }
+})();
+</script>
+</body>
+</html>

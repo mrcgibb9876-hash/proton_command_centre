@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+PORT=8686
+alive() { curl -sf -m1 "http://127.0.0.1:$PORT/api/status" >/dev/null 2>&1; }
+if ! alive; then
+    if command -v systemctl >/dev/null && systemctl --user cat proton-command-center.service >/dev/null 2>&1; then
+        systemctl --user start proton-command-center.service
+    else
+        nohup python3 /usr/share/proton-command-center/pcc.py >/dev/null 2>&1 &
+    fi
+    for _ in $(seq 1 40); do alive && break; sleep 0.25; done
+fi
+xdg-open "http://localhost:$PORT" >/dev/null 2>&1 || \
+    echo "Backend running — open http://localhost:$PORT"

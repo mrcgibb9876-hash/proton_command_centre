@@ -1,0 +1,11 @@
+[Unit]
+Description=Proton Command Center backend
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/share/proton-command-center/pcc.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
