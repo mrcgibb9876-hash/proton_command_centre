@@ -15,7 +15,7 @@ optdepends=(
     'nvidia-utils: DLSS DLL management and driver-aware compile tracking'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')  # run: updpkgsums
+sha256sums=('dd685c86cdc6c5fa4bce78718714a3ca777e2d8c6c4d40fca7e1b85d34de03c9')
 
 package() {
     cd "$srcdir/$_repo-$pkgver"
