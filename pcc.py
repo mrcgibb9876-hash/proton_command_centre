@@ -18,13 +18,12 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
-__version__ = "1.1.0"
 STARTED_AT = int(time.time())
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 PORT = 8686
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -1527,6 +1526,7 @@ class Handler(BaseHTTPRequestHandler):
                 html = (APP_DIR / "index.html").read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache, must-revalidate")
                 self.send_header("Content-Length", str(len(html)))
                 self.end_headers()
                 self.wfile.write(html)
@@ -1536,7 +1536,7 @@ class Handler(BaseHTTPRequestHandler):
                     "steam_running": steam_running(),
                     "fossilize": find_fossilize(),
                     "driver": driver_version(),
-                    "version": __version__,
+                    "version": VERSION,
                     "started_at": STARTED_AT,
                 })
             elif self.path == "/api/games":
