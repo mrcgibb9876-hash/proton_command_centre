@@ -248,6 +248,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
           <option value="">— pick a starting point —</option>
           <option value="cachyos">CachyOS baseline (Wayland · HDR · NTSync · game-performance)</option>
           <option value="ue5">UE5 anti-stutter (NVAPI · NTSync · game-performance)</option>
+          <option value="fgmax">Max smoothness (4x FG · Reflex · NGX updater)</option>
           <option value="ace">Anti-cheat spoof (STEAMDECK=1)</option>
           <option value="clean">Minimal (%command% only)</option>
         </select>
@@ -258,15 +259,60 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
       <div id="toggles"></div>
     </div>
     <div class="section">
-      <h3>DLSS render preset override</h3>
+      <h3>DLSS Super Resolution</h3>
       <div class="row">
-        <select id="dlssPreset">
-          <option value="">Off (game default)</option>
-          <option value="render_preset_k">Preset K</option>
-          <option value="render_preset_l">Preset L</option>
-          <option value="render_preset_m">Preset M</option>
-          <option value="render_preset_latest">Latest</option>
+        <select id="srMode">
+          <option value="">Mode: game default</option>
+          <option value="dlaa">DLAA</option>
+          <option value="quality">Quality</option>
+          <option value="balanced">Balanced</option>
+          <option value="performance">Performance</option>
+          <option value="ultra_performance">Ultra Performance</option>
+          <option value="custom">Custom ratio…</option>
         </select>
+        <input type="number" id="srRatio" min="33" max="100" placeholder="%" style="width:76px;display:none">
+        <select id="dlssPreset">
+          <option value="">Preset: game default</option>
+          <option value="render_preset_j">J (transformer)</option>
+          <option value="render_preset_k">K (transformer)</option>
+          <option value="render_preset_l">L (DLSS 4.5)</option>
+          <option value="render_preset_m">M (DLSS 4.5)</option>
+          <option value="render_preset_latest">Latest / recommended</option>
+        </select>
+      </div>
+      <p class="note">Custom scaling ratio needs a recent Proton (dxvk-nvapi 0.9.1+).</p>
+    </div>
+    <div class="section">
+      <h3>DLSS Frame Generation</h3>
+      <div class="row">
+        <select id="fgMode">
+          <option value="">Off (game controls it)</option>
+          <option value="0">Force on (app-controlled multiplier)</option>
+          <option value="1">Force 2x</option>
+          <option value="2">Force 3x</option>
+          <option value="3">Force 4x</option>
+        </select>
+      </div>
+      <p class="note">Multi-frame (3x/4x) is RTX 50-series; your 5070 qualifies. Pair with Reflex.</p>
+    </div>
+    <div class="section">
+      <h3>DLSS Ray Reconstruction</h3>
+      <div class="row">
+        <select id="rrPreset">
+          <option value="">Off (game default)</option>
+          <option value="on">Force on (default preset)</option>
+          <option value="render_preset_k">Force on · preset K</option>
+          <option value="render_preset_l">Force on · preset L</option>
+          <option value="render_preset_m">Force on · preset M</option>
+          <option value="render_preset_latest">Force on · latest</option>
+        </select>
+      </div>
+    </div>
+    <div class="section">
+      <h3>Frame rate cap</h3>
+      <div class="row">
+        <input type="number" id="fpsCap" min="10" max="1000" placeholder="uncapped" style="width:110px">
+        <span class="note">DXVK_FRAME_RATE — engine-level cap, works in most DXVK/VKD3D titles</span>
       </div>
     </div>
     <div class="section">
@@ -362,7 +408,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 
 <script>
 "use strict";
-const FRONTEND_VERSION="1.1.0";
+const FRONTEND_VERSION="1.2.0";
 const $=s=>document.querySelector(s);
 const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
 const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
@@ -385,10 +431,15 @@ const TOGGLES=[
  {id:"steamdeck",label:"Steam Deck spoof",hint:"STEAMDECK=1 — helps some anti-cheat (ACE) accept Linux",env:"STEAMDECK=1"},
  {id:"mangohud",label:"MangoHud overlay",hint:"Adds the mangohud wrapper",wrap:"mangohud"},
  {id:"gameperf",label:"game-performance",hint:"CachyOS power-profile wrapper",wrap:"game-performance"},
+ {id:"smooth",label:"Smooth Motion",hint:"Driver-level frame generation for games without DLSS FG (RTX 40/50, recent drivers)",env:"NVPRESENT_ENABLE_SMOOTH_MOTION=1"},
+ {id:"reflex",label:"NVIDIA Reflex (Vulkan)",hint:"DXVK_NVAPI_VKREFLEX=1 — needs the dxvk-nvapi Reflex layer; pairs well with FG",env:"DXVK_NVAPI_VKREFLEX=1"},
+ {id:"ngxupd",label:"NGX auto-updater",hint:"PROTON_ENABLE_NGX_UPDATER=1 — driver keeps DLSS DLLs current (may override manual swaps)",env:"PROTON_ENABLE_NGX_UPDATER=1"},
+ {id:"dlsshud",label:"DLSS indicator overlay",hint:"On-screen proof of which DLSS preset/FG mode is active",env:"DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS=DLSSIndicator=1024,DLSSGIndicator=2"},
 ];
 const PRESETS={
  cachyos:{on:["wayland","hdr","ntsync","gameperf"],dlss:"render_preset_m"},
  ue5:{on:["nvapi","ntsync","gameperf"],dlss:""},
+ fgmax:{on:["nvapi","reflex","ngxupd","gameperf"],dlss:"render_preset_latest",fg:"3"},
  ace:{on:["steamdeck"],dlss:""},
  clean:{on:[],dlss:""},
 };
@@ -411,9 +462,22 @@ function buildString(){
     if(t.env)env.push(t.env);
     if(t.wrap)wraps.push(t.wrap);
   }
-  const p=$("#dlssPreset").value;
-  if(p)env.push("DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE=on",
-    "DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE_RENDER_PRESET_SELECTION="+p);
+  const srMode=$("#srMode").value,srPreset=$("#dlssPreset").value,
+        fg=$("#fgMode").value,rr=$("#rrPreset").value,cap=$("#fpsCap").value;
+  if(srMode||srPreset)env.push("DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE=on");
+  if(srMode)env.push("DXVK_NVAPI_DRS_NGX_DLSS_SR_MODE="+srMode);
+  if(srMode==="custom"&&$("#srRatio").value)
+    env.push("DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE_SCALING_RATIO="+$("#srRatio").value);
+  if(srPreset)env.push("DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE_RENDER_PRESET_SELECTION="+srPreset);
+  if(fg!==""){
+    env.push("DXVK_NVAPI_DRS_NGX_DLSS_FG_OVERRIDE=on");
+    if(fg!=="0")env.push("DXVK_NVAPI_DRS_NGX_DLSS_FG_OVERRIDE_MULTI_FRAME_COUNT="+fg);
+  }
+  if(rr){
+    env.push("DXVK_NVAPI_DRS_NGX_DLSS_RR_OVERRIDE=on");
+    if(rr!=="on")env.push("DXVK_NVAPI_DRS_NGX_DLSS_RR_OVERRIDE_RENDER_PRESET_SELECTION="+rr);
+  }
+  if(cap)env.push("DXVK_FRAME_RATE="+cap);
   const extraEnv=$("#extraEnv").value.trim();
   if(extraEnv)env.push(extraEnv);
   const parts=[...env,...wraps,"%command%"];
@@ -421,12 +485,19 @@ function buildString(){
   if(args)parts.push(args);
   $("#launchStr").value=parts.join(" ");
 }
-["#dlssPreset","#extraEnv","#extraArgs"].forEach(s=>$(s).addEventListener("input",()=>{manualEdit=false;buildString()}));
+$("#srMode").addEventListener("change",()=>{
+  $("#srRatio").style.display=$("#srMode").value==="custom"?"":"none";
+  manualEdit=false;buildString();
+});
+["#dlssPreset","#srRatio","#fgMode","#rrPreset","#fpsCap","#extraEnv","#extraArgs"].forEach(s=>$(s).addEventListener("input",()=>{manualEdit=false;buildString()}));
 $("#launchStr").addEventListener("input",()=>{manualEdit=true});
 $("#preset").addEventListener("change",e=>{
   const p=PRESETS[e.target.value];if(!p)return;
   document.querySelectorAll("#toggles input").forEach(i=>i.checked=p.on.includes(i.dataset.id));
-  $("#dlssPreset").value=p.dlss;manualEdit=false;buildString();
+  $("#dlssPreset").value=p.dlss;
+  $("#fgMode").value=p.fg||"";
+  $("#srMode").value="";$("#srRatio").value="";$("#rrPreset").value="";$("#fpsCap").value="";
+  manualEdit=false;buildString();
 });
 
 /* naive reverse-parse: light the toggles a saved string matches */
@@ -435,8 +506,19 @@ function loadStringIntoUI(str){
     const t=TOGGLES.find(t=>t.id===i.dataset.id);
     i.checked=!!(t.env&&t.env.split(" ").every(e=>str.includes(e))||t.wrap&&new RegExp("\\b"+t.wrap+"\\b").test(str));
   });
-  const m=str.match(/RENDER_PRESET_SELECTION=(\S+)/);
-  $("#dlssPreset").value=m?m[1]:"";
+  const sr=str.match(/SR_OVERRIDE_RENDER_PRESET_SELECTION=(\S+)/);
+  $("#dlssPreset").value=sr?sr[1]:"";
+  const md=str.match(/DLSS_SR_MODE=(\S+)/);
+  $("#srMode").value=md?md[1]:"";
+  $("#srRatio").style.display=$("#srMode").value==="custom"?"":"none";
+  const ra=str.match(/SR_OVERRIDE_SCALING_RATIO=(\d+)/);
+  $("#srRatio").value=ra?ra[1]:"";
+  const mf=str.match(/FG_OVERRIDE_MULTI_FRAME_COUNT=(\d)/);
+  $("#fgMode").value=mf?mf[1]:(/DLSS_FG_OVERRIDE=on/.test(str)?"0":"");
+  const rp=str.match(/RR_OVERRIDE_RENDER_PRESET_SELECTION=(\S+)/);
+  $("#rrPreset").value=rp?rp[1]:(/DLSS_RR_OVERRIDE=on/.test(str)?"on":"");
+  const fc=str.match(/DXVK_FRAME_RATE=(\d+)/);
+  $("#fpsCap").value=fc?fc[1]:"";
   $("#extraEnv").value="";$("#extraArgs").value="";
   $("#launchStr").value=str;manualEdit=!!str;
   if(!str){manualEdit=false;buildString()}

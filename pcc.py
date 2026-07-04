@@ -24,7 +24,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 PORT = 8686
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -107,6 +107,25 @@ def _clean_game_name(name):
 ART_MISSES = {}  # appid -> timestamp of last failed lookup (avoid re-hammering)
 
 
+def _sgdb_grids(path_base, key, t):
+    """Grids at preferred dimensions first, then any static grid at all —
+    many entries (esp. new/beta games) only have portrait or odd sizes."""
+    for suffix in ("?dimensions=460x215,920x430&types=static", "?types=static"):
+        try:
+            data = _sgdb_get(path_base + suffix, key)
+            grids = data.get("data") or []
+            if grids:
+                res = _fetch_image(grids[0]["url"])
+                if res:
+                    return res
+                t.append(f"{path_base}: grid fetch invalid ({suffix})")
+            else:
+                t.append(f"{path_base}: no grids ({suffix})")
+        except Exception as e:
+            t.append(f"{path_base}: {e}")
+    return None
+
+
 def sgdb_art(appid, name=None, trace=None):
     """Resolve 460x215 art through a cascade covering beta/demo appids.
     Cached files are validated by magic bytes on every serve — corrupt
@@ -149,20 +168,10 @@ def sgdb_art(appid, name=None, trace=None):
         t.append("no SGDB key set")
     else:
         # 2. SGDB by Steam appid
-        try:
-            data = _sgdb_get(f"/grids/steam/{appid}?dimensions=460x215,920x430"
-                             f"&types=static", key)
-            grids = data.get("data") or []
-            if grids:
-                res = _fetch_image(grids[0]["url"])
-                if res:
-                    t.append("SGDB appid: ok")
-                    return save(res)
-                t.append("SGDB appid: grid fetch invalid")
-            else:
-                t.append("SGDB appid: no grids")
-        except Exception as e:
-            t.append(f"SGDB appid: {e}")
+        res = _sgdb_grids(f"/grids/steam/{appid}", key, t)
+        if res:
+            t.append("SGDB appid: ok")
+            return save(res)
         # 3. SGDB by cleaned name
         clean = _clean_game_name(name)
         if not clean:
@@ -171,19 +180,14 @@ def sgdb_art(appid, name=None, trace=None):
             try:
                 hits = _sgdb_get("/search/autocomplete/"
                                  + urllib.parse.quote(clean), key).get("data") or []
-                if hits:
-                    gid = hits[0]["id"]
-                    data = _sgdb_get(f"/grids/game/{gid}?dimensions=460x215,920x430"
-                                     f"&types=static", key)
-                    grids = data.get("data") or []
-                    if grids:
-                        res = _fetch_image(grids[0]["url"])
-                        if res:
-                            t.append(f"SGDB name search '{clean}': ok")
-                            return save(res)
-                    t.append(f"SGDB name search '{clean}': no usable grids")
-                else:
+                if not hits:
                     t.append(f"SGDB name search '{clean}': no matches")
+                for hit in hits[:3]:
+                    res = _sgdb_grids(f"/grids/game/{hit['id']}", key, t)
+                    if res:
+                        t.append(f"SGDB name search '{clean}' -> "
+                                 f"{hit.get('name', hit['id'])}: ok")
+                        return save(res)
             except Exception as e:
                 t.append(f"SGDB name search: {e}")
 
