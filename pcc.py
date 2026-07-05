@@ -23,7 +23,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 PORT = 8686
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -1718,7 +1718,8 @@ def _fmt_elapsed(s):
 
 
 def precompile_cache(task_id, root, appid, device_index=0):
-    TASKS[task_id] = {"status": "running", "kind": "compile", "progress": 0,
+    TASKS[task_id] = {"status": "running", "kind": "compile", "scope": "game",
+                      "appid": str(appid), "progress": 0,
                       "detail": "Locating fossilize_replay"}
     exe, tried = find_fossilize(debug=True)
     if not exe:
@@ -1766,8 +1767,8 @@ def precompile_cache(task_id, root, appid, device_index=0):
 
 
 def precompile_all(task_id, root, device_index=0, skip_compiled=True):
-    TASKS[task_id] = {"status": "running", "kind": "compile", "progress": 0,
-                      "detail": "Scanning library"}
+    TASKS[task_id] = {"status": "running", "kind": "compile", "scope": "all",
+                      "appid": None, "progress": 0, "detail": "Scanning library"}
     exe, tried = find_fossilize(debug=True)
     if not exe:
         why = ("; ".join(tried))[-300:] if tried else "not found"
@@ -1793,6 +1794,7 @@ def precompile_all(task_id, root, device_index=0, skip_compiled=True):
     total = len(todo)
     for gi, (g, foz_files) in enumerate(todo):
         n = len(foz_files)
+        TASKS[task_id]["appid"] = str(g["appid"])
         for i, foz in enumerate(foz_files, 1):
             name = Path(foz).name
             TASKS[task_id]["detail"] = f'{g["name"]} — {name} ({i}/{n})'
@@ -1947,6 +1949,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "max-age=86400")
                 self.end_headers()
                 self.wfile.write(img)
+            elif self.path == "/api/compile/active":
+                tid = compile_task_running()
+                if tid:
+                    t = TASKS[tid]
+                    self._json({"active": True, "task": tid,
+                                **{k: t.get(k) for k in
+                                   ("status", "progress", "detail",
+                                    "scope", "appid")}})
+                else:
+                    self._json({"active": False})
             elif self.path == "/api/mangohud":
                 self._json(mangohud_status())
             elif self.path == "/api/settings":

@@ -418,7 +418,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 
 <script>
 "use strict";
-const FRONTEND_VERSION="1.3.2";
+const FRONTEND_VERSION="1.3.3";
 const $=s=>document.querySelector(s);
 const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
 const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
@@ -800,10 +800,11 @@ $("#precompileBtn").addEventListener("click",async()=>{
   try{
     const {task}=await post(`/api/game/${current.appid}/cache/precompile`,
       {device_index:+$("#devIdx").value});
-    pb.disabled=true;cb.hidden=false;
+    locallyTracked.add(task);
+    pb.disabled=true;pb.dataset.localRun="1";cb.hidden=false;
     cb.onclick=async()=>{cb.disabled=true;try{await post(`/api/tasks/${task}/cancel`)}catch(e){}};
     trackTask(task,"#fozBar",()=>{toast("Precompile finished");loadCache(current.appid)},"#fozDetail",
-      ()=>{pb.disabled=false;cb.hidden=true;cb.disabled=false});
+      ()=>{pb.disabled=false;delete pb.dataset.localRun;cb.hidden=true;cb.disabled=false;locallyTracked.delete(task)});
   }catch(e){toast(e.message,true)}
 });
 
@@ -925,37 +926,74 @@ document.addEventListener("click",e=>{
   if(!e.target.closest("#settingsPop")&&!e.target.closest("#settingsBtn"))$("#settingsPop").hidden=true;
 });
 
-/* ---------- compile all ---------- */
-let compileAllTask=null;
+/* ---------- compile all + shared compile state ---------- */
+let compileAllTask=null;          // active scope=all task (set by poller too, survives refresh)
+let lastCompileTask=null;         // for completion toast after task vanishes
+const locallyTracked=new Set();   // task ids this page already tracks via trackTask
+
 $("#compileAll").addEventListener("click",async()=>{
-  const btn=$("#compileAll");
-  if(compileAllTask){                       // second click = cancel
+  if(compileAllTask){             // second click = cancel
     try{await post(`/api/tasks/${compileAllTask}/cancel`)}catch(e){}
     return;
   }
   try{
     const {task}=await post("/api/precompile_all",{device_index:+($("#devIdx")?.value||0),skip_compiled:true});
     compileAllTask=task;
-    btn.title="Click to cancel";
-    const bar=$("#globalBar i");
-    const iv=setInterval(async()=>{
-      try{
-        const t=await api("/api/tasks/"+task);
-        bar.style.width=(t.progress||0)+"%";
-        if(t.detail)btn.textContent="✕ "+(t.detail.length>38?t.detail.slice(0,38)+"…":t.detail);
-        if(t.status==="done"||t.status==="error"||t.status==="cancelled"){
-          clearInterval(iv);bar.style.width="0%";compileAllTask=null;
-          btn.textContent="Compile all";btn.title="";
-          toast(t.detail,t.status==="error");
+    syncCompileState();
+  }catch(e){toast(e.message,true)}
+});
+
+async function syncCompileState(){
+  let a={active:false};
+  try{a=await api("/api/compile/active")}catch(e){return}
+  const btn=$("#compileAll"),pb=$("#precompileBtn"),cb=$("#cancelCompileBtn");
+
+  if(a.active){
+    lastCompileTask=a.task;
+    // header button: show progress for scope=all, allow click-to-cancel
+    if(a.scope==="all"){
+      compileAllTask=a.task;
+      btn.title="Click to cancel";
+      if(a.detail)btn.textContent="✕ "+(a.detail.length>38?a.detail.slice(0,38)+"…":a.detail);
+      $("#globalBar i").style.width=(a.progress||0)+"%";
+    }else{
+      btn.disabled=true;btn.title="A per-game compile is running";
+    }
+    // per-game button: always greyed while any compile runs
+    if(pb){pb.disabled=true;pb.title=a.scope==="all"?"Compile All is running":"A compile is already running"}
+    // mirror into the open game's panel when it's the game being compiled
+    if(current&&String(a.appid)===String(current.appid)&&!locallyTracked.has(a.task)){
+      const bar=$("#fozBar");bar.classList.add("show");
+      bar.querySelector("i").style.width=(a.progress||0)+"%";
+      $("#fozDetail").textContent=(a.scope==="all"?"Compile All: ":"")+(a.detail||"");
+      if(cb&&a.scope==="game"){cb.hidden=false;cb.onclick=async()=>{cb.disabled=true;
+        try{await post(`/api/tasks/${a.task}/cancel`)}catch(e){}}}
+    }
+  }else{
+    // idle: restore all controls; toast the result of a task we watched end
+    if(compileAllTask||lastCompileTask){
+      const finished=lastCompileTask;
+      compileAllTask=null;
+      if(finished&&!locallyTracked.has(finished)){
+        try{
+          const t=await api("/api/tasks/"+finished);
+          if(t.status&&t.status!=="unknown")toast(t.detail,t.status==="error");
+        }catch(e){}
+        try{
           const d=await api("/api/games");
           games=d.games.filter(g=>g.installed);
-          seedStatus(games);
-          renderGrid($("#search").value);
-        }
-      }catch(e){clearInterval(iv);compileAllTask=null;btn.textContent="Compile all";btn.title=""}
-    },1000);
-  }catch(e){toast(e.message,true);compileAllTask=null}
-});
+          seedStatus(games);renderGrid($("#search").value);
+        }catch(e){}
+      }
+      lastCompileTask=null;
+    }
+    btn.disabled=false;btn.textContent="Compile all";btn.title="";
+    $("#globalBar i").style.width="0%";
+    if(pb&&!pb.dataset.localRun){pb.disabled=false;pb.title=""}
+  }
+}
+setInterval(syncCompileState,1500);
+syncCompileState();
 
 /* ---------- benchmark ---------- */
 function spark(points,color){
