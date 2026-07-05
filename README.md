@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="assets/pcc-banner.svg" width="100%" alt="Proton Command Center — launch options, DLSS, shaders and benchmarks for Steam on Linux">
+</p>
+
+
+
 # Proton Command Center
 
 One place to run your Steam library on Linux without touching Steam's UI:
