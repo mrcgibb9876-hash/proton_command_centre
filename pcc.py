@@ -23,7 +23,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 PORT = 8686
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -948,6 +948,182 @@ def restore_dll(game_dll_path):
 
 
 # --------------------------------------------------------------------------
+# MangoHud overlay (global config — per-game enable is the Launch tab toggle)
+# --------------------------------------------------------------------------
+
+MANGOHUD_CONF = Path.home() / ".config/MangoHud/MangoHud.conf"
+MANGOHUD_MARKER = "# Managed by Proton Command Center"
+
+_IGPU_RE = re.compile(
+    r"radeon (610m|660m|680m|740m|760m|780m|860m|880m|890m)"
+    r"|graphics 6\d\d|iris|uhd graphics|vega \d+ (mobile|integrated)", re.I)
+
+
+def mangohud_cpu_name():
+    """'AMD Ryzen AI 7 350 w/ Radeon 860M' -> 'AMD Ryzen AI 7 350'."""
+    raw = ""
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                raw = line.split(":", 1)[1].strip()
+                break
+    except OSError:
+        return "CPU"
+    name = re.sub(r"\((R|TM)\)", "", raw, flags=re.I)
+    name = re.sub(r" CPU| \d+-Core Processor| Processor", "", name)
+    name = re.sub(r" with Radeon( \d+M)? Graphics| w/.*", "", name)
+    name = re.sub(r" @ [\d.]+GHz", "", name)
+    return re.sub(r"\s+", " ", name).strip() or "CPU"
+
+
+def _short_gpu_name(name):
+    name = re.sub(r"NVIDIA |GeForce |AMD |Radeon ", "", name or "")
+    name = re.sub(r" Laptop GPU| Mobile", "", name)
+    return re.sub(r"\s+", " ", name).strip() or "GPU"
+
+
+def mangohud_dgpu():
+    """(label, pci_dev) for the dedicated GPU only. nvidia-smi first,
+    lspci fallback that filters known iGPU names, so the HUD never shows
+    the integrated GPU on hybrid laptops. pci_dev is MangoHud's
+    domain:bus:slot.func format, e.g. 0:01:00.0."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,pci.bus_id",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            name, bus = [x.strip() for x in
+                         out.stdout.strip().splitlines()[0].rsplit(",", 1)]
+            parts = bus.lower().split(":")          # 00000000:01:00.0
+            if len(parts) == 3:
+                domain = format(int(parts[0], 16), "x")
+                return _short_gpu_name(name), f"{domain}:{parts[1]}:{parts[2]}"
+    except Exception:
+        pass
+    fallback = (None, None)
+    try:
+        out = subprocess.run(["lspci", "-D"], capture_output=True,
+                             text=True, timeout=5)
+        for line in out.stdout.splitlines():
+            if not re.search(r"VGA|3D controller", line):
+                continue
+            addr, desc = line.split(" ", 1)
+            if _IGPU_RE.search(desc):
+                continue
+            m = re.search(r"\[(.+?)\]", desc)
+            label = _short_gpu_name(m.group(1) if m else desc)
+            pci = re.sub(r"^0{3}", "", addr)        # 0000: -> 0:
+            if "nvidia" in desc.lower():
+                return label, pci
+            if fallback[0] is None and re.search(r"amd|ati", desc, re.I):
+                fallback = (label, pci)
+    except Exception:
+        pass
+    return fallback if fallback[0] else ("GPU", None)
+
+
+def _mangohud_font():
+    try:
+        for q in ("JetBrains Mono:style=Medium", "JetBrains Mono"):
+            out = subprocess.run(["fc-match", "-f", "%{file}", q],
+                                 capture_output=True, text=True, timeout=5)
+            if "JetBrains" in out.stdout:
+                return out.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def mangohud_status():
+    gpu, pci = mangohud_dgpu()
+    managed, font_size = False, 22
+    if MANGOHUD_CONF.is_file():
+        text = MANGOHUD_CONF.read_text(errors="replace")
+        managed = MANGOHUD_MARKER in text
+        m = re.search(r"^font_size=(\d+)", text, re.M)
+        if m:
+            font_size = int(m.group(1))
+    return {
+        "mangohud_installed": shutil.which("mangohud") is not None,
+        "font_installed": _mangohud_font() is not None,
+        "config_exists": MANGOHUD_CONF.is_file(),
+        "managed_by_pcc": managed,
+        "font_size": font_size,
+        "cpu": mangohud_cpu_name(),
+        "gpu": gpu,
+        "pci_dev": pci,
+    }
+
+
+def mangohud_apply(body):
+    """Write the one-line overlay config. Existing config gets a timestamped
+    backup next to it — same manners as the localconfig.vdf saves.
+    Note: in legacy_layout=false mode every listed param becomes a column,
+    even param=0, and MangoHud 0.8.2 draws a separator per column — so only
+    the params we actually display are listed (no trailing empty bars)."""
+    try:
+        font_size = max(12, min(48, int((body or {}).get("font_size", 22))))
+    except (TypeError, ValueError):
+        font_size = 22
+    cpu = mangohud_cpu_name()
+    gpu, pci = mangohud_dgpu()
+    font = _mangohud_font()
+
+    MANGOHUD_CONF.parent.mkdir(parents=True, exist_ok=True)
+    backup = None
+    if MANGOHUD_CONF.is_file():
+        backup = MANGOHUD_CONF.parent / (
+            f"MangoHud.conf.pcc-{int(time.time())}.bak")
+        shutil.copy2(MANGOHUD_CONF, backup)
+
+    lines = [
+        MANGOHUD_MARKER,
+        f"# Written {time.strftime('%Y-%m-%d %H:%M')} — re-apply from the "
+        "gear menu after a hardware change",
+        "",
+        "legacy_layout=false",
+        "horizontal",
+        "horizontal_stretch=0",
+        "position=top-left",
+        "round_corners=10",
+        "background_alpha=0.35",
+        "alpha=1.0",
+        "horizontal_separator_color=3A434D",
+        "",
+    ]
+    if font:
+        lines.append(f"font_file={font}")
+    lines += [f"font_size={font_size}", ""]
+    if pci:
+        lines.append(f"pci_dev={pci}")
+    lines += [
+        f"gpu_text={gpu}",
+        "gpu_stats",
+        "gpu_temp",
+        "gpu_load_change",
+        "gpu_load_value=60,90",
+        "gpu_load_color=FFFFFF,FFAA7F,CC0000",
+        "",
+        f"cpu_text={cpu}",
+        "cpu_stats",
+        "cpu_temp",
+        "cpu_load_change",
+        "cpu_load_value=60,90",
+        "cpu_load_color=FFFFFF,FFAA7F,CC0000",
+        "",
+        "fps",
+        "fps_metrics=avg,0.01,0.001",
+        "",
+        "toggle_hud=Shift_R+F12",
+    ]
+    MANGOHUD_CONF.write_text("\n".join(lines) + "\n")
+    return {"ok": True, "cpu": cpu, "gpu": gpu, "pci_dev": pci,
+            "font_size": font_size, "path": str(MANGOHUD_CONF),
+            "backup": str(backup) if backup else None}
+
+
+# --------------------------------------------------------------------------
 # Owned library (community profile XML — no API key needed)
 # --------------------------------------------------------------------------
 
@@ -1624,6 +1800,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "max-age=86400")
                 self.end_headers()
                 self.wfile.write(img)
+            elif self.path == "/api/mangohud":
+                self._json(mangohud_status())
             elif self.path == "/api/settings":
                 key = load_config().get("sgdb_api_key", "")
                 skey = load_config().get("steam_api_key", "")
@@ -1652,8 +1830,8 @@ class Handler(BaseHTTPRequestHandler):
                     cfg["steam_api_key"] = str(body["steam_api_key"]).strip()
                 save_config(cfg)
                 self._json({"saved": True})
-            elif m := re.match(r"^/api/game/(\d+)/install$", self.path):
-                self._json({"installing": install_game(m.group(1))})
+            elif self.path == "/api/mangohud":
+                self._json(mangohud_apply(body))
             elif m := re.match(r"^/api/game/(\d+)/install$", self.path):
                 self._json({"installing": install_game(m.group(1))})
             elif m := re.match(r"^/api/game/(\d+)/launch$", self.path):

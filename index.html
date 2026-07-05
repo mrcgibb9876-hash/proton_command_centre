@@ -194,6 +194,15 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
     <button class="btn primary" id="saveSteamKey">Save</button>
   </div>
   <p class="note" id="keyStatus" style="margin-top:8px"></p>
+  <h3 style="font-size:12.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:16px 0 10px">MangoHud overlay</h3>
+  <p class="note" style="margin:0 0 10px">One-line HUD, top-left: dedicated GPU + CPU load/temp, current / avg /
+    1% / 0.1% low FPS. Writes <span class="mono">~/.config/MangoHud/MangoHud.conf</span> (existing config is
+    backed up). Turn it on per game with the MangoHud toggle in the Launch tab.</p>
+  <div class="row">
+    <input type="number" id="mhSize" min="12" max="48" value="22" title="Font size" style="width:76px">
+    <button class="btn primary" id="mhApply" style="flex:1">Apply overlay style</button>
+  </div>
+  <p class="note" id="mhStatus" style="margin-top:8px"></p>
   <div class="row" style="margin-top:10px">
     <button class="btn" id="artReset">Clear art cache & re-fetch</button>
   </div>
@@ -408,7 +417,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 
 <script>
 "use strict";
-const FRONTEND_VERSION="1.2.1";
+const FRONTEND_VERSION="1.3.0";
 const $=s=>document.querySelector(s);
 const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
 const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
@@ -853,6 +862,7 @@ $("#compatSave").addEventListener("click",async()=>{
 $("#settingsBtn").addEventListener("click",async()=>{
   const pop=$("#settingsPop");pop.hidden=!pop.hidden;
   if(!pop.hidden){
+    loadMangohud();
     try{const s=await api("/api/settings");
       $("#keyStatus").textContent=s.sgdb_api_key_set?`Key saved (${s.sgdb_api_key_hint})`:"No key set — Steam CDN art only";
     }catch(e){}
@@ -879,6 +889,26 @@ $("#artReset").addEventListener("click",async()=>{
     const r=await post("/api/art/reset");
     toast(`Art cache cleared (${r.cleared} files) — re-fetching`);
     renderGrid($("#search").value);   // fresh imgs restart the fallback chain
+  }catch(e){toast(e.message,true)}
+});
+async function loadMangohud(){
+  try{
+    const s=await api("/api/mangohud");
+    $("#mhSize").value=s.font_size;
+    const where=s.gpu+(s.pci_dev?` (${s.pci_dev})`:"");
+    $("#mhStatus").textContent=
+      !s.mangohud_installed?"MangoHud not installed — sudo pacman -S mangohud lib32-mangohud ttf-jetbrains-mono"
+      :!s.font_installed?`Detected ${where} · ${s.cpu} — install ttf-jetbrains-mono for the intended font`
+      :s.managed_by_pcc?`Active — ${where} pinned · ${s.cpu}`
+      :s.config_exists?"A hand-written MangoHud.conf exists — applying backs it up and replaces it"
+      :`Ready — will pin ${where} and label ${s.cpu}`;
+  }catch(e){}
+}
+$("#mhApply").addEventListener("click",async()=>{
+  try{
+    const r=await post("/api/mangohud",{font_size:+$("#mhSize").value});
+    toast(`Overlay set — ${r.gpu} @ ${r.font_size}px`+(r.backup?" (old config backed up)":""));
+    loadMangohud();
   }catch(e){toast(e.message,true)}
 });
 document.addEventListener("click",e=>{
