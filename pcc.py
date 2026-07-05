@@ -23,7 +23,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.3.0"
+VERSION = "1.3.2"
 PORT = 8686
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -44,6 +44,14 @@ KIND_TO_NAME = {v["kind"]: k for k, v in DLSS_KINDS.items()}
 NVIDIA_DLSS_REPO_API = "https://api.github.com/repos/NVIDIA/DLSS/contents/lib/Windows_x86_64/rel"
 
 TASKS = {}  # task_id -> {status, progress, detail}
+
+
+def compile_task_running():
+    """Only one fossilize compile may run at a time — concurrent replays
+    fight over the same cores and the same driver cache."""
+    return next((tid for tid, t in TASKS.items()
+                 if t.get("status") == "running" and t.get("kind") == "compile"),
+                None)
 STATE_FILE = DATA_DIR / "state.json"
 STATE_LOCK = threading.Lock()
 CONFIG_FILE = DATA_DIR / "config.json"
@@ -1590,25 +1598,134 @@ def clear_cache(root, appid, keep_recordings=True):
     return {"cleared": cleared, "kept_recordings": kept}
 
 
-def find_fossilize():
+def _fossilize_candidates():
+    seen = []
     exe = shutil.which("fossilize_replay") or shutil.which("fossilize-replay")
     if exe:
-        return exe
+        seen.append(exe)
     root = steam_root()
     if root:
         hits = list(root.glob("ubuntu12_64/fossilize_replay")) + \
-               list(root.glob("steamapps/common/SteamLinuxRuntime*/**/fossilize_replay"))
-        if hits:
-            return str(hits[0])
+               sorted(root.glob("steamapps/common/SteamLinuxRuntime*/**/fossilize_replay"),
+                      key=lambda p: ("files/bin" not in str(p), str(p)))
+        seen += [str(h) for h in hits]
+    # dedupe, preserve order
+    out, dup = [], set()
+    for s in seen:
+        if s not in dup:
+            out.append(s); dup.add(s)
+    return out
+
+
+_FOSSILIZE_CACHE = {"exe": None, "tried": []}
+
+
+def find_fossilize(debug=False):
+    """First fossilize_replay that actually executes on this system.
+    Steam-runtime copies often can't run standalone (missing container
+    libs) — those are detected and skipped, with the reason recorded."""
+    if _FOSSILIZE_CACHE["exe"] and Path(_FOSSILIZE_CACHE["exe"]).exists():
+        return (_FOSSILIZE_CACHE["exe"], _FOSSILIZE_CACHE["tried"]) if debug \
+            else _FOSSILIZE_CACHE["exe"]
+    tried = []
+    for exe in _fossilize_candidates():
+        try:
+            out = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=10)
+            err = (out.stderr or "") + (out.stdout or "")
+            if "error while loading shared libraries" in err:
+                tried.append(f"{exe}: needs Steam runtime libs (can't run standalone)")
+                continue
+            _FOSSILIZE_CACHE.update(exe=exe, tried=tried)
+            return (exe, tried) if debug else exe
+        except (OSError, subprocess.TimeoutExpired) as e:
+            tried.append(f"{exe}: {e.__class__.__name__}: {e}")
+    _FOSSILIZE_CACHE.update(exe=None, tried=tried)
+    return (None, tried) if debug else None
+
+
+_PROGRESS_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
+
+
+def _replay_foz(exe, foz, device_index, on_beat=None, cancelled=None):
+    """Run one fossilize replay with a live heartbeat.
+    on_beat(frac_or_None, elapsed_s, last_line) fires every second so the
+    task detail can show elapsed time and, when fossilize logs 'N / M'
+    progress lines, a real percentage. cancelled() returning True kills the
+    process. Returns None on success, 'cancelled', or an error string —
+    replays on big caches (SotTR etc.) legitimately run 30-60+ min, which
+    used to look identical to a hang."""
+    import collections
+    try:
+        proc = subprocess.Popen(
+            [exe, "--device-index", str(device_index),
+             "--num-threads", str(max(1, (os.cpu_count() or 4) - 2)), foz],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    except Exception as e:
+        return f"{e.__class__.__name__}: {e}"
+
+    lines = collections.deque(maxlen=40)
+
+    def _pump():
+        try:
+            for ln in proc.stderr:
+                lines.append(ln.rstrip())
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_pump, daemon=True)
+    t.start()
+    start = time.time()
+    while True:
+        rc = proc.poll()
+        if rc is not None:
+            break
+        if cancelled and cancelled():
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            return "cancelled"
+        elapsed = time.time() - start
+        if elapsed > 4 * 3600:
+            proc.kill()
+            return "timed out after 4 hours"
+        if on_beat:
+            frac = None
+            for ln in reversed(lines):
+                m = _PROGRESS_RE.search(ln)
+                if m and int(m.group(2)) > 0:
+                    frac = min(1.0, int(m.group(1)) / int(m.group(2)))
+                    break
+            on_beat(frac, elapsed, lines[-1] if lines else "")
+        time.sleep(1)
+    t.join(timeout=2)
+    if rc != 0:
+        tail = "\n".join(list(lines)[-4:]).strip()[-300:]
+        hint = ""
+        if "error while loading shared libraries" in tail:
+            hint = " — this copy needs Steam's runtime; install 'fossilize' from the AUR"
+        elif "device" in tail.lower() and "index" in tail.lower():
+            hint = " — try a different GPU device index"
+        return f"exit code {rc}: {tail or 'no output'}{hint}"
     return None
 
 
+def _fmt_elapsed(s):
+    m, sec = divmod(int(s), 60)
+    return f"{m}m {sec:02d}s" if m else f"{sec}s"
+
+
 def precompile_cache(task_id, root, appid, device_index=0):
-    TASKS[task_id] = {"status": "running", "progress": 0, "detail": "Locating fossilize_replay"}
-    exe = find_fossilize()
+    TASKS[task_id] = {"status": "running", "kind": "compile", "progress": 0,
+                      "detail": "Locating fossilize_replay"}
+    exe, tried = find_fossilize(debug=True)
     if not exe:
+        why = ("; ".join(tried))[-300:] if tried else \
+            "not found (install 'fossilize' from the AUR or run a Proton game once)"
         TASKS[task_id] = {"status": "error", "progress": 0,
-                          "detail": "fossilize_replay not found (install fossilize or run once from Steam)"}
+                          "detail": f"fossilize_replay unusable — {why}"}
         return
     foz_files = find_foz(root, appid)
     if not foz_files:
@@ -1616,30 +1733,46 @@ def precompile_cache(task_id, root, appid, device_index=0):
                           "detail": "No .foz pipeline files found — launch the game once so Steam collects them"}
         return
     done = 0
-    for foz in foz_files:
-        TASKS[task_id]["detail"] = f"Replaying {Path(foz).name}"
-        try:
-            subprocess.run(
-                [exe, "--device-index", str(device_index),
-                 "--num-threads", str(max(1, (os.cpu_count() or 4) - 2)), foz],
-                capture_output=True, timeout=3600,
-            )
-        except Exception as e:
-            TASKS[task_id] = {"status": "error", "progress": 0, "detail": f"{Path(foz).name}: {e}"}
+    n = len(foz_files)
+    for i, foz in enumerate(foz_files, 1):
+        name = Path(foz).name
+        TASKS[task_id]["detail"] = f"Replaying {name} ({i}/{n})"
+
+        def beat(frac, elapsed, _line, _i=i, _name=name):
+            pct = f", {int(frac * 100)}% of file" if frac is not None else ""
+            TASKS[task_id]["detail"] = \
+                f"Replaying {_name} ({_i}/{n}) — {_fmt_elapsed(elapsed)}{pct}"
+            base = (_i - 1) / n
+            TASKS[task_id]["progress"] = int(
+                (base + (frac if frac is not None else 0) / n) * 100)
+
+        err = _replay_foz(exe, foz, device_index, on_beat=beat,
+                          cancelled=lambda: TASKS.get(task_id, {}).get("cancel"))
+        if err == "cancelled":
+            TASKS[task_id] = {"status": "cancelled",
+                              "progress": TASKS[task_id].get("progress", 0),
+                              "detail": f"Cancelled during {name}"}
+            return
+        if err:
+            TASKS[task_id] = {"status": "error",
+                              "progress": TASKS[task_id].get("progress", 0),
+                              "detail": f"{name}: {err}"}
             return
         done += 1
-        TASKS[task_id]["progress"] = int(done / len(foz_files) * 100)
+        TASKS[task_id]["progress"] = int(done / n * 100)
     mark_compiled(root, appid)
     TASKS[task_id] = {"status": "done", "progress": 100,
                       "detail": f"Replayed {done} pipeline database(s)"}
 
 
 def precompile_all(task_id, root, device_index=0, skip_compiled=True):
-    TASKS[task_id] = {"status": "running", "progress": 0, "detail": "Scanning library"}
-    exe = find_fossilize()
+    TASKS[task_id] = {"status": "running", "kind": "compile", "progress": 0,
+                      "detail": "Scanning library"}
+    exe, tried = find_fossilize(debug=True)
     if not exe:
+        why = ("; ".join(tried))[-300:] if tried else "not found"
         TASKS[task_id] = {"status": "error", "progress": 0,
-                          "detail": "fossilize_replay not found"}
+                          "detail": f"fossilize_replay unusable — {why}"}
         return
     state = load_state()
     drv = driver_version()
@@ -1657,22 +1790,36 @@ def precompile_all(task_id, root, device_index=0, skip_compiled=True):
         TASKS[task_id] = {"status": "done", "progress": 100,
                           "detail": "Everything already compiled — nothing to do"}
         return
-    threads = str(max(1, (os.cpu_count() or 4) - 2))
+    total = len(todo)
     for gi, (g, foz_files) in enumerate(todo):
-        for foz in foz_files:
-            TASKS[task_id]["detail"] = f'{g["name"]} — {Path(foz).name}'
-            try:
-                subprocess.run([exe, "--device-index", str(device_index),
-                                "--num-threads", threads, foz],
-                               capture_output=True, timeout=3600)
-            except Exception as e:
-                TASKS[task_id] = {"status": "error", "progress": 0,
-                                  "detail": f'{g["name"]}: {e}'}
+        n = len(foz_files)
+        for i, foz in enumerate(foz_files, 1):
+            name = Path(foz).name
+            TASKS[task_id]["detail"] = f'{g["name"]} — {name} ({i}/{n})'
+
+            def beat(frac, elapsed, _line, _g=g, _name=name, _i=i, _n=n, _gi=gi):
+                pct = f", {int(frac * 100)}% of file" if frac is not None else ""
+                TASKS[task_id]["detail"] = \
+                    f'{_g["name"]} — {_name} ({_i}/{_n}) — {_fmt_elapsed(elapsed)}{pct}'
+                within = ((_i - 1) + (frac if frac is not None else 0)) / _n
+                TASKS[task_id]["progress"] = int((_gi + within) / total * 100)
+
+            err = _replay_foz(exe, foz, device_index, on_beat=beat,
+                              cancelled=lambda: TASKS.get(task_id, {}).get("cancel"))
+            if err == "cancelled":
+                TASKS[task_id] = {"status": "cancelled",
+                                  "progress": TASKS[task_id].get("progress", 0),
+                                  "detail": f'Cancelled during {g["name"]}'}
+                return
+            if err:
+                TASKS[task_id] = {"status": "error",
+                                  "progress": TASKS[task_id].get("progress", 0),
+                                  "detail": f'{g["name"]} / {name}: {err}'}
                 return
         mark_compiled(root, g["appid"])
-        TASKS[task_id]["progress"] = int((gi + 1) / len(todo) * 100)
+        TASKS[task_id]["progress"] = int((gi + 1) / total * 100)
     TASKS[task_id] = {"status": "done", "progress": 100,
-                      "detail": f"Compiled {len(todo)} game(s)"}
+                      "detail": f"Compiled {total} game(s)"}
 
 
 # --------------------------------------------------------------------------
@@ -1830,6 +1977,13 @@ class Handler(BaseHTTPRequestHandler):
                     cfg["steam_api_key"] = str(body["steam_api_key"]).strip()
                 save_config(cfg)
                 self._json({"saved": True})
+            elif m := re.match(r"^/api/tasks/([\w-]+)/cancel$", self.path):
+                t = TASKS.get(m.group(1))
+                if t and t.get("status") == "running":
+                    t["cancel"] = True
+                    self._json({"cancelling": True})
+                else:
+                    self._json({"cancelling": False, "detail": "no running task"})
             elif self.path == "/api/mangohud":
                 self._json(mangohud_apply(body))
             elif m := re.match(r"^/api/game/(\d+)/install$", self.path):
@@ -1870,6 +2024,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(clear_cache(root, m.group(1),
                                        keep_recordings=body.get("keep_recordings", True)))
             elif self.path == "/api/precompile_all":
+                if running := compile_task_running():
+                    self._json({"error": "A compile is already running — "
+                                "cancel it first or wait for it to finish",
+                                "task": running}, 409)
+                    return
                 tid = str(uuid.uuid4())
                 threading.Thread(
                     target=precompile_all,
@@ -1879,6 +2038,11 @@ class Handler(BaseHTTPRequestHandler):
                 ).start()
                 self._json({"task": tid})
             elif m := re.match(r"^/api/game/(\d+)/cache/precompile$", self.path):
+                if running := compile_task_running():
+                    self._json({"error": "A compile is already running — "
+                                "cancel it first or wait for it to finish",
+                                "task": running}, 409)
+                    return
                 tid = str(uuid.uuid4())
                 threading.Thread(
                     target=precompile_cache,
