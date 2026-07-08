@@ -1,10 +1,12 @@
 # Proton Command Center
 
 One place to run your Steam library on Linux without touching Steam's UI:
-per-game launch options, Proton version selection, DLSS DLL management with
-one-click updates, Fossilize shader precompilation with persistent tracking,
-MangoHud before/after benchmarks, full owned-library view with one-click
-installs, and a Play button. Built for Arch-based distros (CachyOS,
+one-click per-game Auto-tune cross-verified against Valve's Deck reports,
+ProtonDB, and the umu-protonfixes database; per-game launch options; Proton
+version selection; DLSS DLL management with one-click updates (SR, Frame
+Generation up to 4x, Ray Reconstruction, Smooth Motion); Fossilize shader
+precompilation with persistent tracking; MangoHud before/after benchmarks;
+full owned-library view with one-click installs; and a Play button. Built for Arch-based distros (CachyOS,
 EndeavourOS, vanilla Arch) with an NVIDIA slant, but nothing Arch-specific
 is required beyond the install scripts.
 
@@ -64,12 +66,44 @@ cache present, **purple** = shaders compiled. Hover a card for **▶ Play**
 Greyed-out cards are owned but not installed; click one and confirm to start
 the install. Click any installed game to open its panel:
 
+**✨ Auto-tune** — the flagship. One click at the top of the Launch tab:
+
+- **Detects the engine from the game files** (Unreal 4/5 via pak/IoStore
+  markers, Unity, RE Engine, Source/Source 2, Godot, GameMaker) and whether
+  the game targets DX12 or DX11 by reading the executable.
+- **Checks your hardware**: VRAM is read from the driver and a
+  `dxgi.maxDeviceMemory` headroom cap is applied on 8 GB-class GPUs to
+  prevent eviction hitching. Handhelds are detected via DMI (Steam Deck,
+  ROG Ally, Legion Go…) so desktop-only fixes — like `SteamDeck=0` for games
+  that wrongly load handheld presets (Stellar Blade) — are applied on
+  desktops and correctly withheld on real handhelds.
+- **Cross-verifies community data** instead of trusting any single source:
+  the aggregate ProtonDB tier, Valve's own professionally-tested Deck
+  compatibility report, and the maintainer-curated umu-protonfixes database
+  (the fix scripts GE-Proton applies automatically). When ProtonDB and
+  Valve agree you're told the data is corroborated; when they disagree
+  you're warned to treat community tips with caution. If a umu fix exists,
+  Auto-tune summarises what it does and points you at GE-Proton in the
+  compat dropdown, which applies it with zero extra work.
+- **Shows its reasoning**: every applied flag comes with the rule that fired
+  and the evidence found. The result lands in the launch builder for review
+  — nothing is written until you hit Save.
+- **Rules are updatable**: drop a `tuning_rules.json` into
+  `~/.local/share/proton-command-center/` to override or extend the built-in
+  engine profiles and per-game fixes without touching code. Community
+  lookups cache locally (24h–7d) so repeated clicks cost nothing.
+
 **Launch tab** — pick a compatibility tool (Proton-CachyOS, GE-Proton, and
 official builds are all auto-detected, including system packages in
 `/usr/share/steam/compatibilitytools.d`), then build the launch string with
-toggles: native Wayland, HDR, NTSync, NVAPI, Steam Deck spoof, MangoHud,
-game-performance, plus a DLSS render-preset override (K/L/M) and free-text
-extras. Presets included for a CachyOS baseline, UE5 anti-stutter, and
+toggles: native Wayland (still opt-in upstream — better pacing and HDR
+without Gamescope, but breaks the Steam Overlay), no-WM-decorations and
+bypass-Steam-Input companions for Wayland quirks, HDR, NTSync, NVAPI, Steam
+Deck spoof, Proton DLSS auto-upgrade, 64-bit-only NVIDIA libs (RTX 40/50
+perf fix), MangoHud, game-performance, Smooth Motion, NVIDIA Reflex, and the
+DLSS indicator overlay — plus full DLSS panels: Super Resolution modes with
+custom scaling ratio and J/K/L/M transformer presets, Frame Generation up to
+4x, Ray Reconstruction presets, and a DXVK frame-rate cap. Presets included for a CachyOS baseline, UE5 anti-stutter, and
 anti-cheat spoofing. **Saving closes Steam cleanly first** (it would
 overwrite the change on exit otherwise) — you'll be asked to confirm, and a
 Start Steam button appears after. Every save makes a timestamped backup next
@@ -128,7 +162,8 @@ frontend: run the restart command above and refresh.
 ## Uninstall
 
 ```bash
-./uninstall.sh
+./uninstall.sh           # interactive
+./uninstall.sh --purge   # remove everything including user data, no questions
 ```
 
 Removes the service, launcher, menu entry, and app files. It asks before
@@ -159,4 +194,10 @@ temp directory, so they run anywhere:
 python3 tests/test_pcc.py
 ```
 
+Run a second instance for testing pre-release builds without touching your
+installed service: `PCC_PORT=8687 python3 pcc.py`. Games launched from the
+Play button run in their own systemd scope, so restarting the backend never
+kills a running game.
+
 MIT licensed. Copyright (c) 2026 Marc Gibb.
+
