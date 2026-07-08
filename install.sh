@@ -55,6 +55,8 @@ command -v gamescope >/dev/null && c_ok "gamescope" || c_warn "gamescope not ins
 echo
 
 # ---- install files ----------------------------------------------------------
+# purge any previous app files first so no stale code can linger
+rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR" "$BIN_DIR" "$DESKTOP_DIR"
 install -m 644 "$SRC_DIR/pcc.py"     "$APP_DIR/pcc.py"
 install -m 644 "$SRC_DIR/index.html" "$APP_DIR/index.html"
@@ -124,4 +126,6 @@ case ":$PATH:" in
   *":$BIN_DIR:"*) : ;;
   *) c_warn "$BIN_DIR is not in your PATH — add it, or launch from the app menu" ;;
 esac
-echo "Done. Launch 'Proton Command Center' from your app menu, or run: $APP_NAME"
+printf '\n\033[32mInstall successful\033[0m — warnings above (if any) are informational, not errors.\n'
+echo "Launch 'Proton Command Center' from your app menu, or run: $APP_NAME"
+echo "Note: if you installed via pacman/AUR, use that instead — don't mix the two."

@@ -14,6 +14,7 @@ import struct
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -23,8 +24,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.3.3"
-PORT = 8686
+VERSION = "1.3.0"
+PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
 DLL_LIBRARY = DATA_DIR / "dlls"        # dlls/<kind>/<version>/<name>.dll
@@ -44,14 +45,6 @@ KIND_TO_NAME = {v["kind"]: k for k, v in DLSS_KINDS.items()}
 NVIDIA_DLSS_REPO_API = "https://api.github.com/repos/NVIDIA/DLSS/contents/lib/Windows_x86_64/rel"
 
 TASKS = {}  # task_id -> {status, progress, detail}
-
-
-def compile_task_running():
-    """Only one fossilize compile may run at a time — concurrent replays
-    fight over the same cores and the same driver cache."""
-    return next((tid for tid, t in TASKS.items()
-                 if t.get("status") == "running" and t.get("kind") == "compile"),
-                None)
 STATE_FILE = DATA_DIR / "state.json"
 STATE_LOCK = threading.Lock()
 CONFIG_FILE = DATA_DIR / "config.json"
@@ -380,23 +373,36 @@ def session_env():
     return env
 
 
+def _spawn_detached(cmd):
+    """Launch GUI apps OUTSIDE our service cgroup. Without this, Steam and
+    games become children of the backend's systemd unit: the service gets
+    charged for their memory, and a service restart kills the game."""
+    env = session_env()
+    if shutil.which("systemd-run"):
+        try:
+            subprocess.Popen(["systemd-run", "--user", "--scope", "--collect",
+                              "--quiet"] + cmd, env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except Exception:
+            pass
+    subprocess.Popen(cmd, start_new_session=True, env=env,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
 def launch_steam():
     exe = shutil.which("steam")
     if not exe:
         raise RuntimeError("'steam' command not found in PATH")
-    subprocess.Popen([exe], start_new_session=True, env=session_env(),
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return True
+    return _spawn_detached([exe])
 
 
 def launch_game(appid):
     exe = shutil.which("steam")
     if not exe:
         raise RuntimeError("'steam' command not found in PATH")
-    subprocess.Popen([exe, f"steam://rungameid/{appid}"],
-                     start_new_session=True, env=session_env(),
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return True
+    return _spawn_detached([exe, f"steam://rungameid/{appid}"])
 
 
 def library_folders(root):
@@ -956,182 +962,6 @@ def restore_dll(game_dll_path):
 
 
 # --------------------------------------------------------------------------
-# MangoHud overlay (global config — per-game enable is the Launch tab toggle)
-# --------------------------------------------------------------------------
-
-MANGOHUD_CONF = Path.home() / ".config/MangoHud/MangoHud.conf"
-MANGOHUD_MARKER = "# Managed by Proton Command Center"
-
-_IGPU_RE = re.compile(
-    r"radeon (610m|660m|680m|740m|760m|780m|860m|880m|890m)"
-    r"|graphics 6\d\d|iris|uhd graphics|vega \d+ (mobile|integrated)", re.I)
-
-
-def mangohud_cpu_name():
-    """'AMD Ryzen AI 7 350 w/ Radeon 860M' -> 'AMD Ryzen AI 7 350'."""
-    raw = ""
-    try:
-        for line in Path("/proc/cpuinfo").read_text().splitlines():
-            if line.startswith("model name"):
-                raw = line.split(":", 1)[1].strip()
-                break
-    except OSError:
-        return "CPU"
-    name = re.sub(r"\((R|TM)\)", "", raw, flags=re.I)
-    name = re.sub(r" CPU| \d+-Core Processor| Processor", "", name)
-    name = re.sub(r" with Radeon( \d+M)? Graphics| w/.*", "", name)
-    name = re.sub(r" @ [\d.]+GHz", "", name)
-    return re.sub(r"\s+", " ", name).strip() or "CPU"
-
-
-def _short_gpu_name(name):
-    name = re.sub(r"NVIDIA |GeForce |AMD |Radeon ", "", name or "")
-    name = re.sub(r" Laptop GPU| Mobile", "", name)
-    return re.sub(r"\s+", " ", name).strip() or "GPU"
-
-
-def mangohud_dgpu():
-    """(label, pci_dev) for the dedicated GPU only. nvidia-smi first,
-    lspci fallback that filters known iGPU names, so the HUD never shows
-    the integrated GPU on hybrid laptops. pci_dev is MangoHud's
-    domain:bus:slot.func format, e.g. 0:01:00.0."""
-    try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,pci.bus_id",
-             "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=5)
-        if out.returncode == 0 and out.stdout.strip():
-            name, bus = [x.strip() for x in
-                         out.stdout.strip().splitlines()[0].rsplit(",", 1)]
-            parts = bus.lower().split(":")          # 00000000:01:00.0
-            if len(parts) == 3:
-                domain = format(int(parts[0], 16), "x")
-                return _short_gpu_name(name), f"{domain}:{parts[1]}:{parts[2]}"
-    except Exception:
-        pass
-    fallback = (None, None)
-    try:
-        out = subprocess.run(["lspci", "-D"], capture_output=True,
-                             text=True, timeout=5)
-        for line in out.stdout.splitlines():
-            if not re.search(r"VGA|3D controller", line):
-                continue
-            addr, desc = line.split(" ", 1)
-            if _IGPU_RE.search(desc):
-                continue
-            m = re.search(r"\[(.+?)\]", desc)
-            label = _short_gpu_name(m.group(1) if m else desc)
-            pci = re.sub(r"^0{3}", "", addr)        # 0000: -> 0:
-            if "nvidia" in desc.lower():
-                return label, pci
-            if fallback[0] is None and re.search(r"amd|ati", desc, re.I):
-                fallback = (label, pci)
-    except Exception:
-        pass
-    return fallback if fallback[0] else ("GPU", None)
-
-
-def _mangohud_font():
-    try:
-        for q in ("JetBrains Mono:style=Medium", "JetBrains Mono"):
-            out = subprocess.run(["fc-match", "-f", "%{file}", q],
-                                 capture_output=True, text=True, timeout=5)
-            if "JetBrains" in out.stdout:
-                return out.stdout.strip()
-    except Exception:
-        pass
-    return None
-
-
-def mangohud_status():
-    gpu, pci = mangohud_dgpu()
-    managed, font_size = False, 22
-    if MANGOHUD_CONF.is_file():
-        text = MANGOHUD_CONF.read_text(errors="replace")
-        managed = MANGOHUD_MARKER in text
-        m = re.search(r"^font_size=(\d+)", text, re.M)
-        if m:
-            font_size = int(m.group(1))
-    return {
-        "mangohud_installed": shutil.which("mangohud") is not None,
-        "font_installed": _mangohud_font() is not None,
-        "config_exists": MANGOHUD_CONF.is_file(),
-        "managed_by_pcc": managed,
-        "font_size": font_size,
-        "cpu": mangohud_cpu_name(),
-        "gpu": gpu,
-        "pci_dev": pci,
-    }
-
-
-def mangohud_apply(body):
-    """Write the one-line overlay config. Existing config gets a timestamped
-    backup next to it — same manners as the localconfig.vdf saves.
-    Note: in legacy_layout=false mode every listed param becomes a column,
-    even param=0, and MangoHud 0.8.2 draws a separator per column — so only
-    the params we actually display are listed (no trailing empty bars)."""
-    try:
-        font_size = max(12, min(48, int((body or {}).get("font_size", 22))))
-    except (TypeError, ValueError):
-        font_size = 22
-    cpu = mangohud_cpu_name()
-    gpu, pci = mangohud_dgpu()
-    font = _mangohud_font()
-
-    MANGOHUD_CONF.parent.mkdir(parents=True, exist_ok=True)
-    backup = None
-    if MANGOHUD_CONF.is_file():
-        backup = MANGOHUD_CONF.parent / (
-            f"MangoHud.conf.pcc-{int(time.time())}.bak")
-        shutil.copy2(MANGOHUD_CONF, backup)
-
-    lines = [
-        MANGOHUD_MARKER,
-        f"# Written {time.strftime('%Y-%m-%d %H:%M')} — re-apply from the "
-        "gear menu after a hardware change",
-        "",
-        "legacy_layout=false",
-        "horizontal",
-        "horizontal_stretch=0",
-        "position=top-left",
-        "round_corners=10",
-        "background_alpha=0.35",
-        "alpha=1.0",
-        "horizontal_separator_color=3A434D",
-        "",
-    ]
-    if font:
-        lines.append(f"font_file={font}")
-    lines += [f"font_size={font_size}", ""]
-    if pci:
-        lines.append(f"pci_dev={pci}")
-    lines += [
-        f"gpu_text={gpu}",
-        "gpu_stats",
-        "gpu_temp",
-        "gpu_load_change",
-        "gpu_load_value=60,90",
-        "gpu_load_color=FFFFFF,FFAA7F,CC0000",
-        "",
-        f"cpu_text={cpu}",
-        "cpu_stats",
-        "cpu_temp",
-        "cpu_load_change",
-        "cpu_load_value=60,90",
-        "cpu_load_color=FFFFFF,FFAA7F,CC0000",
-        "",
-        "fps",
-        "fps_metrics=avg,0.01,0.001",
-        "",
-        "toggle_hud=Shift_R+F12",
-    ]
-    MANGOHUD_CONF.write_text("\n".join(lines) + "\n")
-    return {"ok": True, "cpu": cpu, "gpu": gpu, "pci_dev": pci,
-            "font_size": font_size, "path": str(MANGOHUD_CONF),
-            "backup": str(backup) if backup else None}
-
-
-# --------------------------------------------------------------------------
 # Owned library (community profile XML — no API key needed)
 # --------------------------------------------------------------------------
 
@@ -1200,10 +1030,321 @@ def install_game(appid):
     exe = shutil.which("steam")
     if not exe:
         raise RuntimeError("'steam' command not found in PATH")
-    subprocess.Popen([exe, f"steam://install/{appid}"],
-                     start_new_session=True, env=session_env(),
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return True
+    return _spawn_detached([exe, f"steam://install/{appid}"])
+
+
+
+# --------------------------------------------------------------------------
+# Auto-tune: engine detection + curated tuning rules
+# --------------------------------------------------------------------------
+def detect_engine(install_path):
+    """Identify the game engine from on-disk markers. Fast: bounded walk."""
+    base = Path(install_path)
+    ev, engine, dx12 = [], None, None
+    if not base.is_dir():
+        return {"engine": None, "dx12": None, "evidence": ["install dir missing"]}
+    names, exes = set(), []
+    ucas = pak = False
+    for i, (dirpath, dirnames, filenames) in enumerate(os.walk(base)):
+        if i > 400:
+            break
+        depth = len(Path(dirpath).relative_to(base).parts)
+        if depth > 4:
+            dirnames[:] = []
+            continue
+        for d in dirnames:
+            names.add(d.lower())
+        for f in filenames:
+            fl = f.lower()
+            names.add(fl)
+            if fl.endswith(".exe"):
+                exes.append(Path(dirpath) / f)
+            if fl.endswith((".ucas", ".utoc")):
+                ucas = True
+            if fl.endswith(".pak"):
+                pak = True
+            if fl.startswith("re_chunk"):
+                engine, _ = "re-engine", ev.append(f"{f} (RE Engine chunk)")
+    if any(n.endswith("_data") for n in names) and "unityplayer.dll" in names:
+        engine = "unity"
+        ev.append("UnityPlayer.dll + *_Data folder")
+    if "engine" in names and pak:
+        engine = "unreal5" if ucas else "unreal4"
+        ev.append("Engine/ + .pak" + (" + IoStore .ucas/.utoc (UE5-style)" if ucas else ""))
+    if any(n.endswith("-win64-shipping.exe") for n in names) and not engine:
+        engine = "unreal4"
+        ev.append("*-Win64-Shipping.exe")
+    if "gameinfo.gi" in names:
+        engine, _ = "source2", ev.append("gameinfo.gi")
+    elif "gameinfo.txt" in names:
+        engine, _ = "source", ev.append("gameinfo.txt")
+    if any(n.endswith(".pck") for n in names) and not engine:
+        engine, _ = "godot", ev.append(".pck archive")
+    if "data.win" in names and not engine:
+        engine, _ = "gamemaker", ev.append("data.win")
+    # DX12 vs DX11: scan the biggest exe for imported runtime names
+    exes.sort(key=lambda e: e.stat().st_size, reverse=True)
+    for exe in exes[:2]:
+        try:
+            blob = exe.read_bytes()[:12_000_000]
+        except OSError:
+            continue
+        has12 = b"d3d12.dll" in blob or b"D3D12" in blob
+        has11 = b"d3d11.dll" in blob or b"D3D11" in blob
+        if has12:
+            dx12 = True
+            ev.append(f"{exe.name}: references D3D12")
+            break
+        if has11:
+            dx12 = False
+            ev.append(f"{exe.name}: references D3D11")
+    return {"engine": engine, "dx12": dx12, "evidence": ev}
+
+
+def gpu_vram_mb():
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.total",
+                              "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            return int(out.stdout.strip().splitlines()[0])
+    except Exception:
+        pass
+    return None
+
+
+DEFAULT_TUNING_RULES = {
+    "base_env": {"PROTON_ENABLE_NVAPI": "1", "PROTON_USE_NTSYNC": "1"},
+    "base_wrappers": ["game-performance"],
+    "vram_cap_below_mb": 12000,
+    "engines": {
+        "unreal4": {
+            "env": {},
+            "notes": ["UE4: PSO stutter is the usual hitching cause — precompile "
+                      "shaders in the Cache tab before judging performance",
+                      "If hitching persists, cap FPS a few frames below refresh "
+                      "(frame pacing) and test with Frame Generation OFF"],
+        },
+        "unreal5": {
+            "env": {},
+            "notes": ["UE5: run shader precompile first — biggest single fix "
+                      "for periodic hitching",
+                      "Frame Generation can worsen UE5 frame pacing — A/B test "
+                      "with the Benchmark tab",
+                      "If traversal stutter remains, an fps cap (DXVK_FRAME_RATE) "
+                      "slightly under refresh smooths delivery"],
+        },
+        "unity": {"env": {}, "notes": ["Unity titles are usually clean under "
+                                       "Proton — Wayland + HDR safe to enable"]},
+        "re-engine": {"env": {}, "notes": ["RE Engine runs well by default; "
+                                           "enable HDR if your display supports it"]},
+        "source": {"env": {}, "notes": []},
+        "source2": {"env": {}, "notes": []},
+        "godot": {"env": {}, "notes": []},
+        "gamemaker": {"env": {}, "notes": []},
+    },
+    "name_overrides": [
+        {"match": "stellar blade",
+         "env": {"PROTON_ENABLE_HDR": "1", "DXVK_HDR": "1"},
+         "desktop_env": {"SteamDeck": "0"},
+         "vram_cap": True,
+         "notes": ["Known VRAM-pressure title: memory cap applied to prevent "
+                   "eviction hitching",
+                   "Engine.ini pool-size tweaks help further (r.Streaming settings)"]},
+        {"match": "mortal shell",
+         "env": {},
+         "vram_cap": True,
+         "fps_cap_hint": True,
+         "notes": ["Rhythmic hitching profile: precompile shaders, test with "
+                   "FG off, VRAM cap applied",
+                   "If hitching survives all three, capture a Benchmark run and "
+                   "check stutter % before/after each change"]},
+    ],
+}
+
+
+def load_tuning_rules():
+    custom = DATA_DIR / "tuning_rules.json"
+    if custom.is_file():
+        try:
+            return json.loads(custom.read_text())
+        except Exception:
+            pass
+    return DEFAULT_TUNING_RULES
+
+
+
+
+HANDHELD_DMI = ("jupiter", "galileo", "rog ally", "legion go", "ayaneo",
+                "gpd win", "onexplayer", "steam deck")
+
+
+def is_handheld():
+    """Detect Steam Deck / handheld PCs via DMI so desktop-only fixes
+    (like SteamDeck=0) are never applied on actual handhelds."""
+    for f in ("/sys/devices/virtual/dmi/id/product_name",
+              "/sys/devices/virtual/dmi/id/board_name"):
+        try:
+            name = Path(f).read_text().strip().lower()
+            if any(h in name for h in HANDHELD_DMI):
+                return True
+        except OSError:
+            continue
+    return os.environ.get("SteamDeck") == "1"
+
+
+def deck_verified(appid):
+    """Valve's own Deck compatibility verdict — professionally tested,
+    the highest-trust community-adjacent source. Cached 7 days."""
+    state = load_state()
+    cache = state.get("deckverified", {}).get(str(appid))
+    if cache and time.time() - cache.get("ts", 0) < 7 * 86400:
+        return cache.get("data")
+    out = None
+    try:
+        req = urllib.request.Request(
+            "https://store.steampowered.com/saleaction/"
+            f"ajaxgetdeckappcompatibilityreport?nAppID={appid}&l=english",
+            headers={"User-Agent": "proton-command-center"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+        results = (data.get("results") or {})
+        code = results.get("resolved_category")
+        out = {"category": {3: "Verified", 2: "Playable",
+                            1: "Unsupported", 0: "Unknown"}.get(code, "Unknown"),
+               "code": code}
+    except Exception:
+        out = None
+    state.setdefault("deckverified", {})[str(appid)] = {"ts": time.time(), "data": out}
+    save_state(state)
+    return out
+
+
+def protondb_summary(appid):
+    """Community compatibility tier from ProtonDB (cached 24h)."""
+    state = load_state()
+    cache = state.get("protondb", {}).get(str(appid))
+    if cache and time.time() - cache.get("ts", 0) < 86400:
+        return cache.get("data")
+    try:
+        req = urllib.request.Request(
+            f"https://www.protondb.com/api/v1/reports/summaries/{appid}.json",
+            headers={"User-Agent": "proton-command-center"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+        out = {"tier": data.get("tier"), "confidence": data.get("confidence"),
+               "total": data.get("total")}
+    except Exception:
+        out = None
+    state.setdefault("protondb", {})[str(appid)] = {"ts": time.time(), "data": out}
+    save_state(state)
+    return out
+
+
+def umu_fix_info(appid):
+    """Does umu-protonfixes (the fix database GE-Proton applies automatically)
+    have a fix script for this appid? Returns a summary if so. Cached 24h."""
+    state = load_state()
+    cache = state.get("umufix", {}).get(str(appid))
+    if cache and time.time() - cache.get("ts", 0) < 86400:
+        return cache.get("data")
+    out = None
+    try:
+        url = ("https://raw.githubusercontent.com/Open-Wine-Components/"
+               f"umu-protonfixes/main/gamefixes-steam/{appid}.py")
+        req = urllib.request.Request(url, headers={"User-Agent": "pcc"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            src = r.read().decode(errors="replace")
+        doc = ""
+        m = re.search(r'"""(.*?)"""', src, re.S)
+        if m:
+            doc = " ".join(m.group(1).split())[:200]
+        actions = []
+        for verb in re.findall(r"util\.protontricks\(['\"](\w+)['\"]\)", src):
+            actions.append(f"winetricks {verb}")
+        for k, v in re.findall(r"util\.set_environment\(['\"]([\w_]+)['\"],\s*['\"]([^'\"]*)['\"]", src):
+            actions.append(f"env {k}={v}")
+        out = {"exists": True, "summary": doc, "actions": actions[:6],
+               "url": f"https://github.com/Open-Wine-Components/umu-protonfixes/blob/main/gamefixes-steam/{appid}.py"}
+    except urllib.error.HTTPError:
+        out = {"exists": False}
+    except Exception:
+        out = None
+    state.setdefault("umufix", {})[str(appid)] = {"ts": time.time(), "data": out}
+    save_state(state)
+    return out
+
+
+def auto_tune(root, appid):
+    games = {g["appid"]: g for g in list_games(root)}
+    g = games.get(str(appid))
+    if not g:
+        raise RuntimeError("game not found")
+    rules = load_tuning_rules()
+    det = detect_engine(g["install_path"])
+    env = dict(rules.get("base_env", {}))
+    wrappers = list(rules.get("base_wrappers", []))
+    notes = []
+    reasons = [f"Engine: {det['engine'] or 'unknown'}"
+               + (f" ({'DX12' if det['dx12'] else 'DX11'})" if det["dx12"] is not None else "")]
+    eng = rules.get("engines", {}).get(det["engine"] or "", {})
+    env.update(eng.get("env", {}))
+    notes += eng.get("notes", [])
+    vram = gpu_vram_mb()
+    cap_applied = False
+    name = g["name"].lower()
+    handheld = is_handheld()
+    for ov in rules.get("name_overrides", []):
+        if ov["match"] in name:
+            env.update(ov.get("env", {}))
+            if ov.get("desktop_env") and not handheld:
+                env.update(ov["desktop_env"])
+                reasons.append("Desktop detected — anti-handheld-preset flags "
+                               "applied (" + " ".join(f"{k}={v}" for k, v
+                               in ov["desktop_env"].items()) + ")")
+            notes += ov.get("notes", [])
+            reasons.append(f"Known-game profile matched: '{ov['match']}'")
+            if ov.get("vram_cap") and vram and vram <= rules.get("vram_cap_below_mb", 12000):
+                env["DXVK_CONFIG"] = f"dxgi.maxDeviceMemory={max(2048, vram - 1024)}"
+                cap_applied = True
+    if not cap_applied and vram and vram <= 8500:
+        env["DXVK_CONFIG"] = f"dxgi.maxDeviceMemory={max(2048, vram - 1024)}"
+        reasons.append(f"{vram} MB VRAM detected — headroom cap applied to "
+                       "prevent eviction stutter")
+    pdb = protondb_summary(appid)
+    umu = umu_fix_info(appid)
+    deck = deck_verified(appid)
+    if deck and pdb and pdb.get("tier"):
+        good_pdb = pdb["tier"] in ("platinum", "gold")
+        good_deck = deck.get("code") in (2, 3)
+        if good_pdb == good_deck:
+            reasons.append(f"Sources agree: ProtonDB {pdb['tier']} + "
+                           f"Valve Deck report '{deck['category']}' — "
+                           "community data corroborated")
+        else:
+            reasons.append(f"Sources disagree: ProtonDB says {pdb['tier']} "
+                           f"but Valve's Deck report says {deck['category']} — "
+                           "treat community launch-option tips with caution")
+    if umu and umu.get("exists"):
+        reasons.append("Community fix exists in umu-protonfixes — select "
+                       "GE-Proton in the compatibility dropdown and it applies "
+                       "automatically")
+    if pdb and pdb.get("tier"):
+        reasons.append(f"ProtonDB: {pdb['tier']} "
+                       f"({pdb.get('total', '?')} reports)")
+    parts = [f"{k}={v}" for k, v in env.items()] + wrappers + ["%command%"]
+    return {
+        "detection": det,
+        "protondb": pdb,
+        "umu_fix": umu,
+        "deck_verified": deck,
+        "handheld": handheld,
+        "launch_string": " ".join(parts),
+        "reasons": reasons + det["evidence"],
+        "notes": notes,
+        "vram_mb": vram,
+        "precompile_recommended": (det["engine"] or "").startswith("unreal"),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -1381,10 +1522,7 @@ def install_game(appid):
     exe = shutil.which("steam")
     if not exe:
         raise RuntimeError("'steam' command not found in PATH")
-    subprocess.Popen([exe, f"steam://install/{appid}"],
-                     start_new_session=True, env=session_env(),
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return True
+    return _spawn_detached([exe, f"steam://install/{appid}"])
 
 
 # --------------------------------------------------------------------------
@@ -1598,135 +1736,25 @@ def clear_cache(root, appid, keep_recordings=True):
     return {"cleared": cleared, "kept_recordings": kept}
 
 
-def _fossilize_candidates():
-    seen = []
+def find_fossilize():
     exe = shutil.which("fossilize_replay") or shutil.which("fossilize-replay")
     if exe:
-        seen.append(exe)
+        return exe
     root = steam_root()
     if root:
         hits = list(root.glob("ubuntu12_64/fossilize_replay")) + \
-               sorted(root.glob("steamapps/common/SteamLinuxRuntime*/**/fossilize_replay"),
-                      key=lambda p: ("files/bin" not in str(p), str(p)))
-        seen += [str(h) for h in hits]
-    # dedupe, preserve order
-    out, dup = [], set()
-    for s in seen:
-        if s not in dup:
-            out.append(s); dup.add(s)
-    return out
-
-
-_FOSSILIZE_CACHE = {"exe": None, "tried": []}
-
-
-def find_fossilize(debug=False):
-    """First fossilize_replay that actually executes on this system.
-    Steam-runtime copies often can't run standalone (missing container
-    libs) — those are detected and skipped, with the reason recorded."""
-    if _FOSSILIZE_CACHE["exe"] and Path(_FOSSILIZE_CACHE["exe"]).exists():
-        return (_FOSSILIZE_CACHE["exe"], _FOSSILIZE_CACHE["tried"]) if debug \
-            else _FOSSILIZE_CACHE["exe"]
-    tried = []
-    for exe in _fossilize_candidates():
-        try:
-            out = subprocess.run([exe], capture_output=True, text=True,
-                                 timeout=10)
-            err = (out.stderr or "") + (out.stdout or "")
-            if "error while loading shared libraries" in err:
-                tried.append(f"{exe}: needs Steam runtime libs (can't run standalone)")
-                continue
-            _FOSSILIZE_CACHE.update(exe=exe, tried=tried)
-            return (exe, tried) if debug else exe
-        except (OSError, subprocess.TimeoutExpired) as e:
-            tried.append(f"{exe}: {e.__class__.__name__}: {e}")
-    _FOSSILIZE_CACHE.update(exe=None, tried=tried)
-    return (None, tried) if debug else None
-
-
-_PROGRESS_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
-
-
-def _replay_foz(exe, foz, device_index, on_beat=None, cancelled=None):
-    """Run one fossilize replay with a live heartbeat.
-    on_beat(frac_or_None, elapsed_s, last_line) fires every second so the
-    task detail can show elapsed time and, when fossilize logs 'N / M'
-    progress lines, a real percentage. cancelled() returning True kills the
-    process. Returns None on success, 'cancelled', or an error string —
-    replays on big caches (SotTR etc.) legitimately run 30-60+ min, which
-    used to look identical to a hang."""
-    import collections
-    try:
-        proc = subprocess.Popen(
-            [exe, "--device-index", str(device_index),
-             "--num-threads", str(max(1, (os.cpu_count() or 4) - 2)), foz],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-    except Exception as e:
-        return f"{e.__class__.__name__}: {e}"
-
-    lines = collections.deque(maxlen=40)
-
-    def _pump():
-        try:
-            for ln in proc.stderr:
-                lines.append(ln.rstrip())
-        except Exception:
-            pass
-
-    t = threading.Thread(target=_pump, daemon=True)
-    t.start()
-    start = time.time()
-    while True:
-        rc = proc.poll()
-        if rc is not None:
-            break
-        if cancelled and cancelled():
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-            return "cancelled"
-        elapsed = time.time() - start
-        if elapsed > 4 * 3600:
-            proc.kill()
-            return "timed out after 4 hours"
-        if on_beat:
-            frac = None
-            for ln in reversed(lines):
-                m = _PROGRESS_RE.search(ln)
-                if m and int(m.group(2)) > 0:
-                    frac = min(1.0, int(m.group(1)) / int(m.group(2)))
-                    break
-            on_beat(frac, elapsed, lines[-1] if lines else "")
-        time.sleep(1)
-    t.join(timeout=2)
-    if rc != 0:
-        tail = "\n".join(list(lines)[-4:]).strip()[-300:]
-        hint = ""
-        if "error while loading shared libraries" in tail:
-            hint = " — this copy needs Steam's runtime; install 'fossilize' from the AUR"
-        elif "device" in tail.lower() and "index" in tail.lower():
-            hint = " — try a different GPU device index"
-        return f"exit code {rc}: {tail or 'no output'}{hint}"
+               list(root.glob("steamapps/common/SteamLinuxRuntime*/**/fossilize_replay"))
+        if hits:
+            return str(hits[0])
     return None
 
 
-def _fmt_elapsed(s):
-    m, sec = divmod(int(s), 60)
-    return f"{m}m {sec:02d}s" if m else f"{sec}s"
-
-
 def precompile_cache(task_id, root, appid, device_index=0):
-    TASKS[task_id] = {"status": "running", "kind": "compile", "scope": "game",
-                      "appid": str(appid), "progress": 0,
-                      "detail": "Locating fossilize_replay"}
-    exe, tried = find_fossilize(debug=True)
+    TASKS[task_id] = {"status": "running", "progress": 0, "detail": "Locating fossilize_replay"}
+    exe = find_fossilize()
     if not exe:
-        why = ("; ".join(tried))[-300:] if tried else \
-            "not found (install 'fossilize' from the AUR or run a Proton game once)"
         TASKS[task_id] = {"status": "error", "progress": 0,
-                          "detail": f"fossilize_replay unusable — {why}"}
+                          "detail": "fossilize_replay not found (install fossilize or run once from Steam)"}
         return
     foz_files = find_foz(root, appid)
     if not foz_files:
@@ -1734,46 +1762,30 @@ def precompile_cache(task_id, root, appid, device_index=0):
                           "detail": "No .foz pipeline files found — launch the game once so Steam collects them"}
         return
     done = 0
-    n = len(foz_files)
-    for i, foz in enumerate(foz_files, 1):
-        name = Path(foz).name
-        TASKS[task_id]["detail"] = f"Replaying {name} ({i}/{n})"
-
-        def beat(frac, elapsed, _line, _i=i, _name=name):
-            pct = f", {int(frac * 100)}% of file" if frac is not None else ""
-            TASKS[task_id]["detail"] = \
-                f"Replaying {_name} ({_i}/{n}) — {_fmt_elapsed(elapsed)}{pct}"
-            base = (_i - 1) / n
-            TASKS[task_id]["progress"] = int(
-                (base + (frac if frac is not None else 0) / n) * 100)
-
-        err = _replay_foz(exe, foz, device_index, on_beat=beat,
-                          cancelled=lambda: TASKS.get(task_id, {}).get("cancel"))
-        if err == "cancelled":
-            TASKS[task_id] = {"status": "cancelled",
-                              "progress": TASKS[task_id].get("progress", 0),
-                              "detail": f"Cancelled during {name}"}
-            return
-        if err:
-            TASKS[task_id] = {"status": "error",
-                              "progress": TASKS[task_id].get("progress", 0),
-                              "detail": f"{name}: {err}"}
+    for foz in foz_files:
+        TASKS[task_id]["detail"] = f"Replaying {Path(foz).name}"
+        try:
+            subprocess.run(
+                [exe, "--device-index", str(device_index),
+                 "--num-threads", str(max(1, (os.cpu_count() or 4) - 2)), foz],
+                capture_output=True, timeout=3600,
+            )
+        except Exception as e:
+            TASKS[task_id] = {"status": "error", "progress": 0, "detail": f"{Path(foz).name}: {e}"}
             return
         done += 1
-        TASKS[task_id]["progress"] = int(done / n * 100)
+        TASKS[task_id]["progress"] = int(done / len(foz_files) * 100)
     mark_compiled(root, appid)
     TASKS[task_id] = {"status": "done", "progress": 100,
                       "detail": f"Replayed {done} pipeline database(s)"}
 
 
 def precompile_all(task_id, root, device_index=0, skip_compiled=True):
-    TASKS[task_id] = {"status": "running", "kind": "compile", "scope": "all",
-                      "appid": None, "progress": 0, "detail": "Scanning library"}
-    exe, tried = find_fossilize(debug=True)
+    TASKS[task_id] = {"status": "running", "progress": 0, "detail": "Scanning library"}
+    exe = find_fossilize()
     if not exe:
-        why = ("; ".join(tried))[-300:] if tried else "not found"
         TASKS[task_id] = {"status": "error", "progress": 0,
-                          "detail": f"fossilize_replay unusable — {why}"}
+                          "detail": "fossilize_replay not found"}
         return
     state = load_state()
     drv = driver_version()
@@ -1791,37 +1803,22 @@ def precompile_all(task_id, root, device_index=0, skip_compiled=True):
         TASKS[task_id] = {"status": "done", "progress": 100,
                           "detail": "Everything already compiled — nothing to do"}
         return
-    total = len(todo)
+    threads = str(max(1, (os.cpu_count() or 4) - 2))
     for gi, (g, foz_files) in enumerate(todo):
-        n = len(foz_files)
-        TASKS[task_id]["appid"] = str(g["appid"])
-        for i, foz in enumerate(foz_files, 1):
-            name = Path(foz).name
-            TASKS[task_id]["detail"] = f'{g["name"]} — {name} ({i}/{n})'
-
-            def beat(frac, elapsed, _line, _g=g, _name=name, _i=i, _n=n, _gi=gi):
-                pct = f", {int(frac * 100)}% of file" if frac is not None else ""
-                TASKS[task_id]["detail"] = \
-                    f'{_g["name"]} — {_name} ({_i}/{_n}) — {_fmt_elapsed(elapsed)}{pct}'
-                within = ((_i - 1) + (frac if frac is not None else 0)) / _n
-                TASKS[task_id]["progress"] = int((_gi + within) / total * 100)
-
-            err = _replay_foz(exe, foz, device_index, on_beat=beat,
-                              cancelled=lambda: TASKS.get(task_id, {}).get("cancel"))
-            if err == "cancelled":
-                TASKS[task_id] = {"status": "cancelled",
-                                  "progress": TASKS[task_id].get("progress", 0),
-                                  "detail": f'Cancelled during {g["name"]}'}
-                return
-            if err:
-                TASKS[task_id] = {"status": "error",
-                                  "progress": TASKS[task_id].get("progress", 0),
-                                  "detail": f'{g["name"]} / {name}: {err}'}
+        for foz in foz_files:
+            TASKS[task_id]["detail"] = f'{g["name"]} — {Path(foz).name}'
+            try:
+                subprocess.run([exe, "--device-index", str(device_index),
+                                "--num-threads", threads, foz],
+                               capture_output=True, timeout=3600)
+            except Exception as e:
+                TASKS[task_id] = {"status": "error", "progress": 0,
+                                  "detail": f'{g["name"]}: {e}'}
                 return
         mark_compiled(root, g["appid"])
-        TASKS[task_id]["progress"] = int((gi + 1) / total * 100)
+        TASKS[task_id]["progress"] = int((gi + 1) / len(todo) * 100)
     TASKS[task_id] = {"status": "done", "progress": 100,
-                      "detail": f"Compiled {total} game(s)"}
+                      "detail": f"Compiled {len(todo)} game(s)"}
 
 
 # --------------------------------------------------------------------------
@@ -1915,6 +1912,8 @@ class Handler(BaseHTTPRequestHandler):
             elif m := re.match(r"^/api/game/(\d+)/cache$", self.path):
                 self._json({"caches": cache_info(root, m.group(1)),
                             "status": compiled_status(root, m.group(1))})
+            elif m := re.match(r"^/api/game/(\d+)/autotune$", self.path):
+                self._json(auto_tune(root, m.group(1)))
             elif m := re.match(r"^/api/game/(\d+)/benchmark$", self.path):
                 self._json(get_benchmark_data(root, m.group(1)))
             elif m := re.match(r"^/api/owned(?:\?(.*))?$", self.path):
@@ -1949,18 +1948,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "max-age=86400")
                 self.end_headers()
                 self.wfile.write(img)
-            elif self.path == "/api/compile/active":
-                tid = compile_task_running()
-                if tid:
-                    t = TASKS[tid]
-                    self._json({"active": True, "task": tid,
-                                **{k: t.get(k) for k in
-                                   ("status", "progress", "detail",
-                                    "scope", "appid")}})
-                else:
-                    self._json({"active": False})
-            elif self.path == "/api/mangohud":
-                self._json(mangohud_status())
             elif self.path == "/api/settings":
                 key = load_config().get("sgdb_api_key", "")
                 skey = load_config().get("steam_api_key", "")
@@ -1989,15 +1976,8 @@ class Handler(BaseHTTPRequestHandler):
                     cfg["steam_api_key"] = str(body["steam_api_key"]).strip()
                 save_config(cfg)
                 self._json({"saved": True})
-            elif m := re.match(r"^/api/tasks/([\w-]+)/cancel$", self.path):
-                t = TASKS.get(m.group(1))
-                if t and t.get("status") == "running":
-                    t["cancel"] = True
-                    self._json({"cancelling": True})
-                else:
-                    self._json({"cancelling": False, "detail": "no running task"})
-            elif self.path == "/api/mangohud":
-                self._json(mangohud_apply(body))
+            elif m := re.match(r"^/api/game/(\d+)/install$", self.path):
+                self._json({"installing": install_game(m.group(1))})
             elif m := re.match(r"^/api/game/(\d+)/install$", self.path):
                 self._json({"installing": install_game(m.group(1))})
             elif m := re.match(r"^/api/game/(\d+)/launch$", self.path):
@@ -2036,11 +2016,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(clear_cache(root, m.group(1),
                                        keep_recordings=body.get("keep_recordings", True)))
             elif self.path == "/api/precompile_all":
-                if running := compile_task_running():
-                    self._json({"error": "A compile is already running — "
-                                "cancel it first or wait for it to finish",
-                                "task": running}, 409)
-                    return
                 tid = str(uuid.uuid4())
                 threading.Thread(
                     target=precompile_all,
@@ -2050,11 +2025,6 @@ class Handler(BaseHTTPRequestHandler):
                 ).start()
                 self._json({"task": tid})
             elif m := re.match(r"^/api/game/(\d+)/cache/precompile$", self.path):
-                if running := compile_task_running():
-                    self._json({"error": "A compile is already running — "
-                                "cancel it first or wait for it to finish",
-                                "task": running}, 409)
-                    return
                 tid = str(uuid.uuid4())
                 threading.Thread(
                     target=precompile_cache,

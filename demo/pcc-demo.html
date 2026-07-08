@@ -199,7 +199,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
   </div>
 </div>
 <div id="globalBar"><i></i></div>
-<div id="verWarn">Backend is running old code — run: <span class="mono">systemctl --user restart proton-command-center</span> then refresh.</div>
+<div id="verWarn">Frontend/backend version mismatch — restart the service (<span class="mono">systemctl --user restart proton-command-center</span>) and hard-refresh this page (Ctrl+Shift+R).</div>
 
 <main>
   <div class="legend">
@@ -232,6 +232,13 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
   <!-- LAUNCH -->
   <div class="pane active" id="pane-launch">
     <div class="warn" id="steamWarn">Steam is running — saving will close it cleanly first (it overwrites launch options on exit otherwise).</div>
+    <div class="section">
+      <div class="row">
+        <button class="btn violet" id="autoTuneBtn">✨ Auto-tune this game</button>
+        <span class="note">Detects the engine, checks VRAM, applies known-good settings</span>
+      </div>
+      <div id="tuneResult" style="margin-top:10px"></div>
+    </div>
     <div class="section">
       <h3>Compatibility tool (Proton)</h3>
       <div class="row">
@@ -427,7 +434,7 @@ window.fetch=async(url,opts)=>{
   const j=o=>new Response(JSON.stringify(o),{status:200,headers:{"Content-Type":"application/json"}});
   await new Promise(r=>setTimeout(r,150));
   let m;
-  if(url==="/api/status")return j({steam_root:"/home/marc/.local/share/Steam",steam_running:MOCK_STEAM_RUNNING,fossilize:"/usr/bin/fossilize_replay",driver:"580.65.06",version:"1.2.0"});
+  if(url==="/api/status")return j({steam_root:"/home/marc/.local/share/Steam",steam_running:MOCK_STEAM_RUNNING,fossilize:"/usr/bin/fossilize_replay",driver:"580.65.06",version:"1.3.0"});
   if(url==="/api/games")return j({games:MOCK_GAMES});
   if(m=url.match(/\/api\/game\/(\d+)\/launch_options$/)){
     if(opts&&opts.method==="POST"){const b=JSON.parse(opts.body);MOCK_LO[m[1]]=b.value;
@@ -491,12 +498,37 @@ window.fetch=async(url,opts)=>{
     {appid:"2050650",name:"Resident Evil 4"},
     {appid:"1774580",name:"STAR WARS Jedi: Survivor"}]});
   if(m=url.match(/\/api\/game\/(\d+)\/install$/))return j({installing:true});
+
+  if(m=url.match(/\/api\/game\/(\d+)\/autotune$/)){
+    const per={
+      "1091500":{eng:"REDengine 4 (DX12)",tier:"platinum",total:2841,fix:false,
+        str:"PROTON_ENABLE_NVAPI=1 PROTON_USE_NTSYNC=1 DXVK_CONFIG=dxgi.maxDeviceMemory=7164 game-performance %command%",
+        reasons:["8188 MB VRAM detected — headroom cap applied to prevent eviction stutter"],
+        notes:["Runs excellently under Proton — DLSS 4 preset override recommended"],pre:false},
+      "1245620":{eng:"unknown (DX12)",tier:"gold",total:1204,fix:true,
+        str:"PROTON_ENABLE_NVAPI=1 PROTON_USE_NTSYNC=1 DXVK_CONFIG=dxgi.maxDeviceMemory=7164 game-performance %command%",
+        reasons:["Community fix exists in umu-protonfixes — select GE-Proton in the compatibility dropdown and it applies automatically","8188 MB VRAM detected — headroom cap applied"],
+        notes:["Cap FPS to 60 — engine physics tied to framerate"],pre:false,
+        actions:["winetricks vcrun2022","env PROTON_NO_WM_DECORATION=1"]},
+      "2358720":{eng:"unreal5 (DX12)",tier:"gold",total:673,fix:false,
+        str:"PROTON_ENABLE_NVAPI=1 PROTON_USE_NTSYNC=1 DXVK_CONFIG=dxgi.maxDeviceMemory=7164 game-performance %command%",
+        reasons:["Engine/ + .pak + IoStore .ucas/.utoc (UE5-style)","Game-Win64-Shipping.exe: references D3D12","8188 MB VRAM detected — headroom cap applied"],
+        notes:["UE5: run shader precompile first — biggest single fix for periodic hitching","Frame Generation can worsen UE5 frame pacing — A/B test with the Benchmark tab"],pre:true},
+    };
+    const d=per[m[1]]||per["2358720"];
+    return j({detection:{engine:d.eng,dx12:true,evidence:[]},
+      launch_string:d.str,
+      reasons:["Engine: "+d.eng].concat(d.reasons),
+      notes:d.notes,vram_mb:8188,precompile_recommended:d.pre,
+      protondb:{tier:d.tier,confidence:"strong",total:d.total},
+      umu_fix:d.fix?{exists:true,summary:"Community fix",actions:d.actions||[]}:{exists:false}});
+  }
   return realFetch(url,opts);
 };
 </script>
 <script>
 "use strict";
-const FRONTEND_VERSION="1.2.0";
+const FRONTEND_VERSION="1.3.0";
 const $=s=>document.querySelector(s);
 const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
 const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
@@ -512,7 +544,11 @@ function toast(msg,err){const t=$("#toast");t.textContent=msg;t.className="toast
 
 /* ---------- launch string builder ---------- */
 const TOGGLES=[
- {id:"wayland",label:"Native Wayland",hint:"PROTON_ENABLE_WAYLAND=1",env:"PROTON_ENABLE_WAYLAND=1"},
+ {id:"wayland",label:"Native Wayland",hint:"Still opt-in (not default yet) — better latency/pacing, HDR without Gamescope, but breaks Steam Overlay",env:"PROTON_ENABLE_WAYLAND=1"},
+ {id:"nodecoration",label:"No WM decorations",hint:"PROTON_NO_WM_DECORATION=1 — fixes erratic mouse / borderless issues under Wayland",env:"PROTON_NO_WM_DECORATION=1"},
+ {id:"nosteaminput",label:"Bypass Steam Input",hint:"PROTON_NO_STEAMINPUT=1 — fixes controllers not responding under Wayland",env:"PROTON_NO_STEAMINPUT=1"},
+ {id:"dlssupgrade",label:"Proton DLSS upgrade",hint:"PROTON_DLSS_UPGRADE=1 — Proton keeps DLSS DLLs at latest (alternative to manual swaps)",env:"PROTON_DLSS_UPGRADE=1"},
+ {id:"no32bit",label:"64-bit NVIDIA libs only",hint:"PROTON_NVIDIA_LIBS_NO_32BIT=1 — fixes perf issues on RTX 40/50 series",env:"PROTON_NVIDIA_LIBS_NO_32BIT=1"},
  {id:"hdr",label:"HDR",hint:"PROTON_ENABLE_HDR=1 DXVK_HDR=1 — disable the in-game HDR toggle if it conflicts",env:"PROTON_ENABLE_HDR=1 DXVK_HDR=1"},
  {id:"ntsync",label:"NTSync",hint:"PROTON_USE_NTSYNC=1 — already default on Proton-CachyOS 11",env:"PROTON_USE_NTSYNC=1"},
  {id:"nvapi",label:"NVAPI",hint:"PROTON_ENABLE_NVAPI=1 — needed for DLSS / Reflex in some titles",env:"PROTON_ENABLE_NVAPI=1"},
@@ -893,6 +929,31 @@ function trackTask(id,barSel,onDone,detailSel){
     }catch(e){clearInterval(iv)}
   },800);
 }
+
+/* ---------- auto-tune ---------- */
+$("#autoTuneBtn").addEventListener("click",async()=>{
+  if(!current)return;
+  const btn=$("#autoTuneBtn");btn.disabled=true;btn.textContent="Analysing…";
+  try{
+    const d=await api(`/api/game/${current.appid}/autotune`);
+    loadStringIntoUI(d.launch_string);
+    const tierColors={platinum:"g",gold:"a",silver:"m",bronze:"m",borked:"m"};
+    $("#tuneResult").innerHTML=`
+      <div class="item">
+        <div class="top"><b>${esc(d.reasons[0]||"Analysis")}</b>
+          ${d.protondb&&d.protondb.tier?`<span class="chip ${tierColors[d.protondb.tier]||"m"}">ProtonDB: ${esc(d.protondb.tier)}</span>`:""}
+          ${d.umu_fix&&d.umu_fix.exists?'<span class="chip g">community fix available (GE-Proton)</span>':""}
+          ${d.precompile_recommended?'<span class="chip a">precompile recommended</span>':""}
+          ${d.vram_mb?`<span class="chip m">${(d.vram_mb/1024).toFixed(0)} GB VRAM</span>`:""}
+        </div>
+        <div class="path">${d.reasons.slice(1).map(esc).join("<br>")}</div>
+        ${d.notes.length?`<div class="path" style="color:var(--cache);margin-top:8px">${d.notes.map(esc).join("<br>")}</div>`:""}
+        ${d.umu_fix&&d.umu_fix.exists&&d.umu_fix.actions&&d.umu_fix.actions.length?`<div class="path" style="margin-top:8px">Fix applies: ${d.umu_fix.actions.map(esc).join(" · ")}</div>`:""}
+      </div>`;
+    toast("Settings applied to the builder — review and Save");
+  }catch(e){toast(e.message,true)}
+  btn.disabled=false;btn.textContent="✨ Auto-tune this game";
+});
 
 /* ---------- owned library ---------- */
 async function installGame(appid){

@@ -463,6 +463,27 @@ class PCCTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             pcc.owned_games(self.root)
 
+    # ---- auto-tune ----
+    def test_detect_engine_and_autotune(self):
+        g = self.root / "steamapps/common/TestGame"
+        (g / "Engine").mkdir(exist_ok=True)
+        paks = g / "Game/Content/Paks"
+        paks.mkdir(parents=True)
+        (paks / "global.ucas").write_bytes(b"x")
+        (paks / "pak0.pak").write_bytes(b"x")
+        exe = g / "Game/Binaries/Win64"
+        exe.mkdir(parents=True)
+        (exe / "Game-Win64-Shipping.exe").write_bytes(
+            b"MZ" + b"\x00" * 50 + b"d3d12.dll")
+        det = pcc.detect_engine(g)
+        self.assertEqual(det["engine"], "unreal5")
+        self.assertTrue(det["dx12"])
+        pcc.gpu_vram_mb = lambda: 8188
+        r = pcc.auto_tune(self.root, "12345")
+        self.assertIn("PROTON_ENABLE_NVAPI=1", r["launch_string"])
+        self.assertIn("dxgi.maxDeviceMemory=7164", r["launch_string"])
+        self.assertTrue(r["precompile_recommended"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

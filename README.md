@@ -1,15 +1,3 @@
-<p align="center">
-  <img src="assets/pcc-banner.svg" width="100%" alt="Proton Command Center — launch options, DLSS, shaders and benchmarks for Steam on Linux">
-</p>
-
-
-
-
-<p align="center">
-  <a href="https://aur.archlinux.org/packages/proton-command-center"><img src="https://img.shields.io/aur/version/proton-command-center?label=AUR&color=f5a623" alt="AUR version"></a>
-</p>
-
-
 # Proton Command Center
 
 One place to run your Steam library on Linux without touching Steam's UI:

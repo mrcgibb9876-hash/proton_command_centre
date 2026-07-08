@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Proton Command Center — uninstaller
+# Usage: ./uninstall.sh [--purge]   (--purge removes ALL user data without asking)
 set -euo pipefail
+PURGE=0
+[ "${1:-}" = "--purge" ] && PURGE=1
 
 APP_NAME="proton-command-center"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -38,11 +41,15 @@ if [ -d "$APP_ROOT" ]; then
     echo
     echo "NOTE: if you swapped DLSS DLLs in any game, restore originals from the"
     echo "app BEFORE deleting backups/, or verify files with Steam afterwards."
-    read -r -p "Delete all user data too? [y/N] " ans
-    case "$ans" in
-        [yY]*) rm -rf "$APP_ROOT"; echo "  user data deleted" ;;
-        *)     echo "  user data kept" ;;
-    esac
+    if [ "$PURGE" = "1" ]; then
+        rm -rf "$APP_ROOT"; echo "  user data purged (--purge)"
+    else
+        read -r -p "Delete all user data too? [y/N] " ans
+        case "$ans" in
+            [yY]*) rm -rf "$APP_ROOT"; echo "  user data deleted" ;;
+            *)     echo "  user data kept" ;;
+        esac
+    fi
 fi
 
 echo

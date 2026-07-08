@@ -194,15 +194,6 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
     <button class="btn primary" id="saveSteamKey">Save</button>
   </div>
   <p class="note" id="keyStatus" style="margin-top:8px"></p>
-  <h3 style="font-size:12.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:16px 0 10px">MangoHud overlay</h3>
-  <p class="note" style="margin:0 0 10px">One-line HUD, top-left: dedicated GPU + CPU load/temp, current / avg /
-    1% / 0.1% low FPS. Writes <span class="mono">~/.config/MangoHud/MangoHud.conf</span> (existing config is
-    backed up). Turn it on per game with the MangoHud toggle in the Launch tab.</p>
-  <div class="row">
-    <input type="number" id="mhSize" min="12" max="48" value="22" title="Font size" style="width:76px">
-    <button class="btn primary" id="mhApply" style="flex:1">Apply overlay style</button>
-  </div>
-  <p class="note" id="mhStatus" style="margin-top:8px"></p>
   <div class="row" style="margin-top:10px">
     <button class="btn" id="artReset">Clear art cache & re-fetch</button>
   </div>
@@ -241,6 +232,13 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
   <!-- LAUNCH -->
   <div class="pane active" id="pane-launch">
     <div class="warn" id="steamWarn">Steam is running — saving will close it cleanly first (it overwrites launch options on exit otherwise).</div>
+    <div class="section">
+      <div class="row">
+        <button class="btn violet" id="autoTuneBtn">✨ Auto-tune this game</button>
+        <span class="note">Detects the engine, checks VRAM, applies known-good settings</span>
+      </div>
+      <div id="tuneResult" style="margin-top:10px"></div>
+    </div>
     <div class="section">
       <h3>Compatibility tool (Proton)</h3>
       <div class="row">
@@ -377,7 +375,6 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
       <h3>Actions</h3>
       <div class="row">
         <button class="btn amber" id="precompileBtn">Precompile shaders (Fossilize)</button>
-        <button class="btn" id="cancelCompileBtn" hidden>Cancel</button>
         <button class="btn danger" id="clearCacheBtn">Clear compiled cache</button>
         <button class="btn danger" id="clearAllBtn">Delete everything</button>
       </div>
@@ -418,7 +415,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 
 <script>
 "use strict";
-const FRONTEND_VERSION="1.3.3";
+const FRONTEND_VERSION="1.3.0";
 const $=s=>document.querySelector(s);
 const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
 const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
@@ -434,7 +431,11 @@ function toast(msg,err){const t=$("#toast");t.textContent=msg;t.className="toast
 
 /* ---------- launch string builder ---------- */
 const TOGGLES=[
- {id:"wayland",label:"Native Wayland",hint:"PROTON_ENABLE_WAYLAND=1",env:"PROTON_ENABLE_WAYLAND=1"},
+ {id:"wayland",label:"Native Wayland",hint:"Still opt-in (not default yet) — better latency/pacing, HDR without Gamescope, but breaks Steam Overlay",env:"PROTON_ENABLE_WAYLAND=1"},
+ {id:"nodecoration",label:"No WM decorations",hint:"PROTON_NO_WM_DECORATION=1 — fixes erratic mouse / borderless issues under Wayland",env:"PROTON_NO_WM_DECORATION=1"},
+ {id:"nosteaminput",label:"Bypass Steam Input",hint:"PROTON_NO_STEAMINPUT=1 — fixes controllers not responding under Wayland",env:"PROTON_NO_STEAMINPUT=1"},
+ {id:"dlssupgrade",label:"Proton DLSS upgrade",hint:"PROTON_DLSS_UPGRADE=1 — Proton keeps DLSS DLLs at latest (alternative to manual swaps)",env:"PROTON_DLSS_UPGRADE=1"},
+ {id:"no32bit",label:"64-bit NVIDIA libs only",hint:"PROTON_NVIDIA_LIBS_NO_32BIT=1 — fixes perf issues on RTX 40/50 series",env:"PROTON_NVIDIA_LIBS_NO_32BIT=1"},
  {id:"hdr",label:"HDR",hint:"PROTON_ENABLE_HDR=1 DXVK_HDR=1 — disable the in-game HDR toggle if it conflicts",env:"PROTON_ENABLE_HDR=1 DXVK_HDR=1"},
  {id:"ntsync",label:"NTSync",hint:"PROTON_USE_NTSYNC=1 — already default on Proton-CachyOS 11",env:"PROTON_USE_NTSYNC=1"},
  {id:"nvapi",label:"NVAPI",hint:"PROTON_ENABLE_NVAPI=1 — needed for DLSS / Reflex in some titles",env:"PROTON_ENABLE_NVAPI=1"},
@@ -796,35 +797,51 @@ $("#clearAllBtn").addEventListener("click",async()=>{
 });
 $("#precompileBtn").addEventListener("click",async()=>{
   if(!current)return;
-  const pb=$("#precompileBtn"),cb=$("#cancelCompileBtn");
   try{
     const {task}=await post(`/api/game/${current.appid}/cache/precompile`,
       {device_index:+$("#devIdx").value});
-    locallyTracked.add(task);
-    pb.disabled=true;pb.dataset.localRun="1";cb.hidden=false;
-    cb.onclick=async()=>{cb.disabled=true;try{await post(`/api/tasks/${task}/cancel`)}catch(e){}};
-    trackTask(task,"#fozBar",()=>{toast("Precompile finished");loadCache(current.appid)},"#fozDetail",
-      ()=>{pb.disabled=false;delete pb.dataset.localRun;cb.hidden=true;cb.disabled=false;locallyTracked.delete(task)});
+    trackTask(task,"#fozBar",()=>{toast("Precompile finished");loadCache(current.appid)},"#fozDetail");
   }catch(e){toast(e.message,true)}
 });
 
-function trackTask(id,barSel,onDone,detailSel,onEnd){
+function trackTask(id,barSel,onDone,detailSel){
   const bar=$(barSel);bar.classList.add("show");bar.querySelector("i").style.width="0%";
   const iv=setInterval(async()=>{
     try{
       const t=await api("/api/tasks/"+id);
       bar.querySelector("i").style.width=(t.progress||0)+"%";
       if(detailSel)$(detailSel).textContent=t.detail||"";
-      if(t.status==="done"){clearInterval(iv);bar.classList.remove("show");if(detailSel)$(detailSel).style.color="";onDone&&onDone();onEnd&&onEnd("done")}
-      if(t.status==="cancelled"){clearInterval(iv);bar.classList.remove("show");
-        if(detailSel){const d=$(detailSel);d.textContent=t.detail||"Cancelled";d.style.color=""}
-        toast(t.detail||"Compile cancelled");onEnd&&onEnd("cancelled")}
-      if(t.status==="error"){clearInterval(iv);bar.classList.remove("show");
-        if(detailSel){const d=$(detailSel);d.textContent="⚠ "+(t.detail||"failed");d.style.color="var(--err,#e66)"}
-        toast(t.detail,true);onEnd&&onEnd("error")}
-    }catch(e){clearInterval(iv);onEnd&&onEnd("error")}
+      if(t.status==="done"){clearInterval(iv);bar.classList.remove("show");onDone&&onDone()}
+      if(t.status==="error"){clearInterval(iv);bar.classList.remove("show");toast(t.detail,true)}
+    }catch(e){clearInterval(iv)}
   },800);
 }
+
+/* ---------- auto-tune ---------- */
+$("#autoTuneBtn").addEventListener("click",async()=>{
+  if(!current)return;
+  const btn=$("#autoTuneBtn");btn.disabled=true;btn.textContent="Analysing…";
+  try{
+    const d=await api(`/api/game/${current.appid}/autotune`);
+    loadStringIntoUI(d.launch_string);
+    const tierColors={platinum:"g",gold:"a",silver:"m",bronze:"m",borked:"m"};
+    $("#tuneResult").innerHTML=`
+      <div class="item">
+        <div class="top"><b>${esc(d.reasons[0]||"Analysis")}</b>
+          ${d.protondb&&d.protondb.tier?`<span class="chip ${tierColors[d.protondb.tier]||"m"}">ProtonDB: ${esc(d.protondb.tier)}</span>`:""}
+          ${d.deck_verified&&d.deck_verified.category&&d.deck_verified.category!=="Unknown"?`<span class="chip ${d.deck_verified.code>=2?"g":"m"}">Valve: Deck ${esc(d.deck_verified.category)}</span>`:""}
+          ${d.umu_fix&&d.umu_fix.exists?'<span class="chip g">community fix available (GE-Proton)</span>':""}
+          ${d.precompile_recommended?'<span class="chip a">precompile recommended</span>':""}
+          ${d.vram_mb?`<span class="chip m">${(d.vram_mb/1024).toFixed(0)} GB VRAM</span>`:""}
+        </div>
+        <div class="path">${d.reasons.slice(1).map(esc).join("<br>")}</div>
+        ${d.notes.length?`<div class="path" style="color:var(--cache);margin-top:8px">${d.notes.map(esc).join("<br>")}</div>`:""}
+        ${d.umu_fix&&d.umu_fix.exists&&d.umu_fix.actions&&d.umu_fix.actions.length?`<div class="path" style="margin-top:8px">Fix applies: ${d.umu_fix.actions.map(esc).join(" · ")}</div>`:""}
+      </div>`;
+    toast("Settings applied to the builder — review and Save");
+  }catch(e){toast(e.message,true)}
+  btn.disabled=false;btn.textContent="✨ Auto-tune this game";
+});
 
 /* ---------- owned library ---------- */
 async function installGame(appid){
@@ -873,7 +890,6 @@ $("#compatSave").addEventListener("click",async()=>{
 $("#settingsBtn").addEventListener("click",async()=>{
   const pop=$("#settingsPop");pop.hidden=!pop.hidden;
   if(!pop.hidden){
-    loadMangohud();
     try{const s=await api("/api/settings");
       $("#keyStatus").textContent=s.sgdb_api_key_set?`Key saved (${s.sgdb_api_key_hint})`:"No key set — Steam CDN art only";
     }catch(e){}
@@ -902,98 +918,33 @@ $("#artReset").addEventListener("click",async()=>{
     renderGrid($("#search").value);   // fresh imgs restart the fallback chain
   }catch(e){toast(e.message,true)}
 });
-async function loadMangohud(){
-  try{
-    const s=await api("/api/mangohud");
-    $("#mhSize").value=s.font_size;
-    const where=s.gpu+(s.pci_dev?` (${s.pci_dev})`:"");
-    $("#mhStatus").textContent=
-      !s.mangohud_installed?"MangoHud not installed — sudo pacman -S mangohud lib32-mangohud ttf-jetbrains-mono"
-      :!s.font_installed?`Detected ${where} · ${s.cpu} — install ttf-jetbrains-mono for the intended font`
-      :s.managed_by_pcc?`Active — ${where} pinned · ${s.cpu}`
-      :s.config_exists?"A hand-written MangoHud.conf exists — applying backs it up and replaces it"
-      :`Ready — will pin ${where} and label ${s.cpu}`;
-  }catch(e){}
-}
-$("#mhApply").addEventListener("click",async()=>{
-  try{
-    const r=await post("/api/mangohud",{font_size:+$("#mhSize").value});
-    toast(`Overlay set — ${r.gpu} @ ${r.font_size}px`+(r.backup?" (old config backed up)":""));
-    loadMangohud();
-  }catch(e){toast(e.message,true)}
-});
 document.addEventListener("click",e=>{
   if(!e.target.closest("#settingsPop")&&!e.target.closest("#settingsBtn"))$("#settingsPop").hidden=true;
 });
 
-/* ---------- compile all + shared compile state ---------- */
-let compileAllTask=null;          // active scope=all task (set by poller too, survives refresh)
-let lastCompileTask=null;         // for completion toast after task vanishes
-const locallyTracked=new Set();   // task ids this page already tracks via trackTask
-
+/* ---------- compile all ---------- */
 $("#compileAll").addEventListener("click",async()=>{
-  if(compileAllTask){             // second click = cancel
-    try{await post(`/api/tasks/${compileAllTask}/cancel`)}catch(e){}
-    return;
-  }
+  const btn=$("#compileAll");btn.disabled=true;
   try{
-    const {task}=await post("/api/precompile_all",{device_index:+($("#devIdx")?.value||0),skip_compiled:true});
-    compileAllTask=task;
-    syncCompileState();
-  }catch(e){toast(e.message,true)}
-});
-
-async function syncCompileState(){
-  let a={active:false};
-  try{a=await api("/api/compile/active")}catch(e){return}
-  const btn=$("#compileAll"),pb=$("#precompileBtn"),cb=$("#cancelCompileBtn");
-
-  if(a.active){
-    lastCompileTask=a.task;
-    // header button: show progress for scope=all, allow click-to-cancel
-    if(a.scope==="all"){
-      compileAllTask=a.task;
-      btn.title="Click to cancel";
-      if(a.detail)btn.textContent="✕ "+(a.detail.length>38?a.detail.slice(0,38)+"…":a.detail);
-      $("#globalBar i").style.width=(a.progress||0)+"%";
-    }else{
-      btn.disabled=true;btn.title="A per-game compile is running";
-    }
-    // per-game button: always greyed while any compile runs
-    if(pb){pb.disabled=true;pb.title=a.scope==="all"?"Compile All is running":"A compile is already running"}
-    // mirror into the open game's panel when it's the game being compiled
-    if(current&&String(a.appid)===String(current.appid)&&!locallyTracked.has(a.task)){
-      const bar=$("#fozBar");bar.classList.add("show");
-      bar.querySelector("i").style.width=(a.progress||0)+"%";
-      $("#fozDetail").textContent=(a.scope==="all"?"Compile All: ":"")+(a.detail||"");
-      if(cb&&a.scope==="game"){cb.hidden=false;cb.onclick=async()=>{cb.disabled=true;
-        try{await post(`/api/tasks/${a.task}/cancel`)}catch(e){}}}
-    }
-  }else{
-    // idle: restore all controls; toast the result of a task we watched end
-    if(compileAllTask||lastCompileTask){
-      const finished=lastCompileTask;
-      compileAllTask=null;
-      if(finished&&!locallyTracked.has(finished)){
-        try{
-          const t=await api("/api/tasks/"+finished);
-          if(t.status&&t.status!=="unknown")toast(t.detail,t.status==="error");
-        }catch(e){}
-        try{
+    const {task}=await post("/api/precompile_all",{device_index:0,skip_compiled:true});
+    const bar=$("#globalBar i");
+    const iv=setInterval(async()=>{
+      try{
+        const t=await api("/api/tasks/"+task);
+        bar.style.width=(t.progress||0)+"%";
+        if(t.detail)btn.textContent=t.detail.length>40?t.detail.slice(0,40)+"…":t.detail;
+        if(t.status==="done"||t.status==="error"){
+          clearInterval(iv);bar.style.width="0%";btn.disabled=false;btn.textContent="Compile all";
+          toast(t.detail,t.status==="error");
           const d=await api("/api/games");
           games=d.games.filter(g=>g.installed);
-          seedStatus(games);renderGrid($("#search").value);
-        }catch(e){}
-      }
-      lastCompileTask=null;
-    }
-    btn.disabled=false;btn.textContent="Compile all";btn.title="";
-    $("#globalBar i").style.width="0%";
-    if(pb&&!pb.dataset.localRun){pb.disabled=false;pb.title=""}
-  }
-}
-setInterval(syncCompileState,1500);
-syncCompileState();
+          seedStatus(games);
+          renderGrid($("#search").value);
+        }
+      }catch(e){clearInterval(iv);btn.disabled=false;btn.textContent="Compile all"}
+    },1000);
+  }catch(e){toast(e.message,true);btn.disabled=false}
+});
 
 /* ---------- benchmark ---------- */
 function spark(points,color){
