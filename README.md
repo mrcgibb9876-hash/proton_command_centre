@@ -1,5 +1,13 @@
 # Proton Command Center
 
+[![AUR version](https://img.shields.io/aur/version/proton-command-center?logo=archlinux&label=AUR)](https://aur.archlinux.org/packages/proton-command-center)
+[![AUR votes](https://img.shields.io/aur/votes/proton-command-center?label=votes)](https://aur.archlinux.org/packages/proton-command-center)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
+**Install on Arch / CachyOS / EndeavourOS:** `yay -S proton-command-center` — [AUR package page](https://aur.archlinux.org/packages/proton-command-center)
+
+
+
 One place to run your Steam library on Linux without touching Steam's UI:
 one-click per-game Auto-tune cross-verified against Valve's Deck reports,
 ProtonDB, and the umu-protonfixes database; per-game launch options; Proton
