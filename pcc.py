@@ -24,7 +24,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.3.6"
+VERSION = "1.3.0"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -1869,6 +1869,74 @@ def precompile_all(task_id, root, device_index=0, skip_compiled=True):
                       "detail": f"Compiled {len(todo)} game(s)"}
 
 
+
+# --------------------------------------------------------------------------
+# Steam's own shader processing ("Processing Vulkan shaders" at launch)
+# --------------------------------------------------------------------------
+SHADER_KEY_RE = re.compile(r"shader|fossilize|precach", re.I)
+
+
+def _walk_vdf(node, prefix=()):
+    for k, v in (node or {}).items():
+        if isinstance(v, dict):
+            yield from _walk_vdf(v, prefix + (k,))
+        else:
+            yield prefix + (k,), v
+
+
+def steam_shader_settings(root):
+    """Find every shader-related key Steam has written, across its configs.
+    Steam only persists these once you've touched them, so an empty result
+    means 'still at defaults'."""
+    out = []
+    candidates = [root / "config/config.vdf"] + list(find_localconfigs(root))
+    for cfg in candidates:
+        if not cfg.is_file():
+            continue
+        try:
+            data = vdf_parse(cfg.read_text(errors="replace"))
+        except Exception:
+            continue
+        keys = [{"path": "/".join(kp), "key": kp[-1], "value": val}
+                for kp, val in _walk_vdf(data)
+                if SHADER_KEY_RE.search(kp[-1])]
+        if keys:
+            out.append({"file": str(cfg), "keys": keys})
+    return {"files": out, "found": bool(out)}
+
+
+def set_steam_shader_setting(root, file, path, value, close_steam=False):
+    cfg = Path(file)
+    if cfg.name not in ("config.vdf", "localconfig.vdf") or not cfg.is_file():
+        raise RuntimeError("refusing to write an unexpected file")
+    if steam_running():
+        if close_steam:
+            shutdown_steam()
+        else:
+            raise RuntimeError("Steam is running — it overwrites its configs "
+                               "on exit. Close it first.")
+    data = vdf_parse(cfg.read_text(errors="replace"))
+    parts = path.split("/")
+    node = data
+    for k in parts[:-1]:
+        nxt = ci_get(node, k)
+        if not isinstance(nxt, dict):
+            raise RuntimeError(f"key path not found: {path}")
+        node = nxt
+    for k in list(node.keys()):
+        if k.lower() == parts[-1].lower():
+            node[k] = str(value)
+            break
+    else:
+        raise RuntimeError(f"key not found: {path}")
+    bak = cfg.with_suffix(f".vdf.pcc-{int(time.time())}.bak")
+    shutil.copy2(cfg, bak)
+    tmp = cfg.with_suffix(".vdf.pcc-tmp")
+    tmp.write_text(vdf_dump(data))
+    tmp.replace(cfg)
+    return {"saved": True, "path": path, "value": str(value), "backup": str(bak)}
+
+
 # --------------------------------------------------------------------------
 # HTTP server
 # --------------------------------------------------------------------------
@@ -1953,6 +2021,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"dlls": dlls})
             elif self.path == "/api/owned_games":
                 self._json({"games": owned_games(root)})
+            elif self.path == "/api/steam/shader_settings":
+                self._json(steam_shader_settings(root))
             elif self.path == "/api/compat_tools":
                 self._json({"tools": list_compat_tools(root)})
             elif m := re.match(r"^/api/game/(\d+)/compat_tool$", self.path):
@@ -2040,6 +2110,10 @@ class Handler(BaseHTTPRequestHandler):
                     n += 1
                 ART_MISSES.clear()
                 self._json({"cleared": n})
+            elif self.path == "/api/steam/shader_settings":
+                self._json(set_steam_shader_setting(
+                    root, body["file"], body["path"], body["value"],
+                    close_steam=bool(body.get("close_steam"))))
             elif self.path == "/api/steam/launch":
                 self._json({"launched": launch_steam()})
             elif self.path == "/api/dlss/swap":

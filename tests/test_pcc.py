@@ -524,6 +524,26 @@ class PCCTests(unittest.TestCase):
             pcc.subprocess.run = real
         self.assertTrue(all("--replayer-cache" in c for c in calls))
 
+    def test_steam_shader_settings_discovery_and_write(self):
+        cfg = self.root / "userdata/12345678/config/localconfig.vdf"
+        txt = cfg.read_text().replace(
+            '"friends"',
+            '"system"\n\t{\n\t\t"BackgroundShaderProcessing"\t\t"1"\n\t}\n\t"friends"', 1)
+        cfg.write_text(txt)
+        s = pcc.steam_shader_settings(self.root)
+        self.assertTrue(s["found"])
+        path = s["files"][0]["keys"][0]["path"]
+        pcc.set_steam_shader_setting(self.root, s["files"][0]["file"], path, 0)
+        s2 = pcc.steam_shader_settings(self.root)
+        self.assertEqual(s2["files"][0]["keys"][0]["value"], "0")
+        d = pcc.vdf_parse(cfg.read_text())
+        self.assertEqual(
+            d["UserLocalConfigStore"]["friends"]["VoiceReceiveVolume"], "0.75")
+
+    def test_steam_shader_setting_rejects_odd_file(self):
+        with self.assertRaises(RuntimeError):
+            pcc.set_steam_shader_setting(self.root, "/etc/passwd", "a/b", 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
