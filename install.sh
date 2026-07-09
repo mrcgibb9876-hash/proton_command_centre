@@ -5,6 +5,32 @@ set -euo pipefail
 APP_NAME="proton-command-center"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 APP_DIR="$DATA_HOME/$APP_NAME/app"
+
+# Guard: refuse to operate on anything that isn't our own app directory.
+# Protects against an empty/hostile HOME or XDG_DATA_HOME turning a later
+# rm -rf into a disaster.
+safe_app_dir() {
+    local d="$1"
+    [ -n "${HOME:-}" ] && [ "$HOME" != "/" ] && [ -d "$HOME" ] || return 1
+    case "$d" in
+        "" | "/" ) return 1 ;;          # root
+        //*)       return 1 ;;          # XDG_DATA_HOME=/ style
+        *"/../"* | *"/.."|"../"*) return 1 ;;   # traversal
+    esac
+    [ "$d" != "$HOME" ] || return 1
+    # must be absolute, ≥3 path components deep, and end with our suffix
+    [ "$(printf '%s' "$d" | awk -F/ '{print NF-1}')" -ge 3 ] || return 1
+    case "$d" in
+        /*"/$APP_NAME/app") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if ! safe_app_dir "$APP_DIR"; then
+    printf '\033[31mfail\033[0m  refusing to use unsafe app path: %s\n' "$APP_DIR"
+    echo "     Check that HOME and XDG_DATA_HOME are set sensibly."
+    exit 1
+fi
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$DATA_HOME/applications"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,8 +81,18 @@ command -v gamescope >/dev/null && c_ok "gamescope" || c_warn "gamescope not ins
 echo
 
 # ---- install files ----------------------------------------------------------
-# purge any previous app files first so no stale code can linger
-rm -rf "$APP_DIR"
+# purge any previous app files first so no stale code can linger.
+# Only ever remove a directory that we can positively identify as ours.
+if [ -d "$APP_DIR" ]; then
+    if [ -f "$APP_DIR/pcc.py" ] || [ -z "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
+        rm -rf -- "$APP_DIR"
+    else
+        c_err "$APP_DIR exists but doesn't look like a Proton Command Center install."
+        echo "     Not touching it. Move it aside and re-run, or use --force."
+        [ "${1:-}" = "--force" ] || exit 1
+        rm -rf -- "$APP_DIR"
+    fi
+fi
 mkdir -p "$APP_DIR" "$BIN_DIR" "$DESKTOP_DIR"
 install -m 644 "$SRC_DIR/pcc.py"     "$APP_DIR/pcc.py"
 install -m 644 "$SRC_DIR/index.html" "$APP_DIR/index.html"

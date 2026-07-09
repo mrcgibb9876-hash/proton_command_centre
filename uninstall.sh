@@ -9,6 +9,20 @@ APP_NAME="proton-command-center"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 APP_ROOT="$DATA_HOME/$APP_NAME"
 
+# Guard: never let a bad HOME/XDG_DATA_HOME turn rm -rf loose.
+unsafe() { echo "refusing unsafe path: $APP_ROOT"; exit 1; }
+[ -n "${HOME:-}" ] && [ "$HOME" != "/" ] && [ -d "$HOME" ] || unsafe
+case "$APP_ROOT" in
+    "" | "/" | "$HOME" ) unsafe ;;
+    //*)                 unsafe ;;
+    *"/../"* | *"/..")   unsafe ;;
+esac
+[ "$(printf '%s' "$APP_ROOT" | awk -F/ '{print NF-1}')" -ge 3 ] || unsafe
+case "$APP_ROOT" in
+    /*"/$APP_NAME") : ;;
+    *) unsafe ;;
+esac
+
 echo "== Proton Command Center uninstaller =="
 
 # stop and remove the systemd user service
@@ -27,7 +41,7 @@ fi
 
 rm -f  "$HOME/.local/bin/$APP_NAME"                 && echo "  removed launcher"
 rm -f  "$DATA_HOME/applications/$APP_NAME.desktop"  && echo "  removed desktop entry"
-rm -rf "$APP_ROOT/app"                              && echo "  removed app files"
+rm -rf -- "$APP_ROOT/app"                           && echo "  removed app files"
 command -v update-desktop-database >/dev/null && update-desktop-database "$DATA_HOME/applications" 2>/dev/null || true
 
 # user data: compile state, DLL library, DLL backups, art cache, SGDB key
@@ -42,11 +56,11 @@ if [ -d "$APP_ROOT" ]; then
     echo "NOTE: if you swapped DLSS DLLs in any game, restore originals from the"
     echo "app BEFORE deleting backups/, or verify files with Steam afterwards."
     if [ "$PURGE" = "1" ]; then
-        rm -rf "$APP_ROOT"; echo "  user data purged (--purge)"
+        rm -rf -- "$APP_ROOT"; echo "  user data purged (--purge)"
     else
         read -r -p "Delete all user data too? [y/N] " ans
         case "$ans" in
-            [yY]*) rm -rf "$APP_ROOT"; echo "  user data deleted" ;;
+            [yY]*) rm -rf -- "$APP_ROOT"; echo "  user data deleted" ;;
             *)     echo "  user data kept" ;;
         esac
     fi
