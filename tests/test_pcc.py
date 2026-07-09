@@ -484,6 +484,29 @@ class PCCTests(unittest.TestCase):
         self.assertIn("dxgi.maxDeviceMemory=7164", r["launch_string"])
         self.assertTrue(r["precompile_recommended"])
 
+    def test_replayer_cache_integration(self):
+        """Our replay must write into Steam's ledger so Steam skips its own
+        'Processing Vulkan shaders' pass — and never replay the ledger as input."""
+        base = self.root / "steamapps/shadercache/12345/fozpipelinesv6"
+        ledger_dir = base / "steamapprun_pipeline_cache.abc123"
+        ledger_dir.mkdir()
+        ledger = ledger_dir / "steam_pipeline_cache.foz"
+        ledger.write_bytes(b"ledger")
+        srcs = pcc.find_foz(self.root, "12345")
+        self.assertTrue(all("steamapprun" not in s for s in srcs))
+        self.assertEqual(pcc.find_replayer_cache(self.root, "12345"),
+                         str(ledger))
+        calls = []
+        pcc.find_fossilize = lambda: "/usr/bin/fossilize_replay"
+        real = pcc.subprocess.run
+        pcc.subprocess.run = lambda cmd, **kw: (
+            calls.append(cmd), type("R", (), {"returncode": 0})())[1]
+        try:
+            pcc.precompile_cache("tt", self.root, "12345", 0)
+        finally:
+            pcc.subprocess.run = real
+        self.assertTrue(all("--replayer-cache" in c for c in calls))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

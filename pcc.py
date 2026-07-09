@@ -24,7 +24,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.3.0"
+VERSION = "1.3.5"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -226,14 +226,34 @@ def driver_version():
 
 
 def find_foz(root, appid):
+    """Source pipeline databases only — excludes whitelists and Steam's own
+    replayer-cache OUTPUT (steamapprun_pipeline_cache*), which is a ledger of
+    completed work, not input."""
     foz = []
     for lib in library_folders(root):
         c = lib / "shadercache" / str(appid)
         if c.is_dir():
             foz += sorted(str(p) for p in c.rglob("*.foz")
                           if "fozpipelines" in str(p.parent)
-                          and "whitelist" not in p.name.lower())
+                          and "whitelist" not in p.name.lower()
+                          and "steamapprun_pipeline_cache" not in str(p).lower())
     return foz
+
+
+def find_replayer_cache(root, appid):
+    """Steam's ledger of compiled pipelines. Writing our replay results here
+    is what makes Steam skip its own 'Processing Vulkan shaders' pass."""
+    for lib in library_folders(root):
+        base = lib / "shadercache" / str(appid) / "fozpipelinesv6"
+        if not base.is_dir():
+            continue
+        hits = sorted(base.glob("steamapprun_pipeline_cache*/steam_pipeline_cache.foz"))
+        if hits:
+            return str(hits[-1])
+        flat = base / "steamapprun_pipeline_cache.foz"
+        if flat.is_file():
+            return str(flat)
+    return None
 
 
 def foz_fingerprint(foz_files):
@@ -1761,15 +1781,17 @@ def precompile_cache(task_id, root, appid, device_index=0):
         TASKS[task_id] = {"status": "error", "progress": 0,
                           "detail": "No .foz pipeline files found — launch the game once so Steam collects them"}
         return
+    rcache = find_replayer_cache(root, appid)
     done = 0
     for foz in foz_files:
         TASKS[task_id]["detail"] = f"Replaying {Path(foz).name}"
+        cmd = [exe, "--device-index", str(device_index),
+               "--num-threads", str(max(1, (os.cpu_count() or 4) - 2))]
+        if rcache:
+            cmd += ["--replayer-cache", rcache]
+        cmd.append(foz)
         try:
-            subprocess.run(
-                [exe, "--device-index", str(device_index),
-                 "--num-threads", str(max(1, (os.cpu_count() or 4) - 2)), foz],
-                capture_output=True, timeout=3600,
-            )
+            subprocess.run(cmd, capture_output=True, timeout=3600)
         except Exception as e:
             TASKS[task_id] = {"status": "error", "progress": 0, "detail": f"{Path(foz).name}: {e}"}
             return
@@ -1777,7 +1799,13 @@ def precompile_cache(task_id, root, appid, device_index=0):
         TASKS[task_id]["progress"] = int(done / len(foz_files) * 100)
     mark_compiled(root, appid)
     TASKS[task_id] = {"status": "done", "progress": 100,
-                      "detail": f"Replayed {done} pipeline database(s)"}
+                      "detail": f"Replayed {done} pipeline database(s)"
+                                + (" — results recorded in Steam's cache, so "
+                                   "Steam should skip its own processing pass"
+                                   if rcache else
+                                   " — note: Steam hasn't created its "
+                                   "pipeline ledger for this game yet; its "
+                                   "first processing pass may still run")}
 
 
 def precompile_all(task_id, root, device_index=0, skip_compiled=True):
@@ -1805,12 +1833,16 @@ def precompile_all(task_id, root, device_index=0, skip_compiled=True):
         return
     threads = str(max(1, (os.cpu_count() or 4) - 2))
     for gi, (g, foz_files) in enumerate(todo):
+        rcache = find_replayer_cache(root, g["appid"])
         for foz in foz_files:
             TASKS[task_id]["detail"] = f'{g["name"]} — {Path(foz).name}'
+            cmd = [exe, "--device-index", str(device_index),
+                   "--num-threads", threads]
+            if rcache:
+                cmd += ["--replayer-cache", rcache]
+            cmd.append(foz)
             try:
-                subprocess.run([exe, "--device-index", str(device_index),
-                                "--num-threads", threads, foz],
-                               capture_output=True, timeout=3600)
+                subprocess.run(cmd, capture_output=True, timeout=3600)
             except Exception as e:
                 TASKS[task_id] = {"status": "error", "progress": 0,
                                   "detail": f'{g["name"]}: {e}'}
