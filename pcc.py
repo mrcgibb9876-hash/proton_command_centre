@@ -24,7 +24,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.3.5"
+VERSION = "1.3.6"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -225,35 +225,51 @@ def driver_version():
     return "unknown"
 
 
+# Fossilize file taxonomy inside steamapps/shadercache/<appid>/fozpipelinesv6/
+#   steam_pipeline_cache.foz                        -> input (downloaded/captured)
+#   steamapprun_pipeline_cache.<hash>.<n>.foz       -> input (runtime capture)
+#   steamapp_pipeline_cache.foz                     -> input
+#   steam_pipeline_cache_whitelist.foz              -> NOT input
+#   replay_cache.<hash>.foz                         -> the replayer ledger (output)
+# Pipelines live BOTH at the top level and inside steamapprun_pipeline_cache.<hash>/
+# directories (one per GPU+driver), so classify by filename, never by path.
+FOZ_INPUT_RE = re.compile(
+    r"^(steam_pipeline_cache"
+    r"|steamapp_pipeline_cache"
+    r"|steamapprun_pipeline_cache\.[0-9a-f]+\.\d+)\.foz$", re.I)
+FOZ_LEDGER_RE = re.compile(r"^replay_cache\.[0-9a-f]+\.foz$", re.I)
+
+
 def find_foz(root, appid):
-    """Source pipeline databases only — excludes whitelists and Steam's own
-    replayer-cache OUTPUT (steamapprun_pipeline_cache*), which is a ledger of
-    completed work, not input."""
-    foz = []
-    for lib in library_folders(root):
-        c = lib / "shadercache" / str(appid)
-        if c.is_dir():
-            foz += sorted(str(p) for p in c.rglob("*.foz")
-                          if "fozpipelines" in str(p.parent)
-                          and "whitelist" not in p.name.lower()
-                          and "steamapprun_pipeline_cache" not in str(p).lower())
-    return foz
-
-
-def find_replayer_cache(root, appid):
-    """Steam's ledger of compiled pipelines. Writing our replay results here
-    is what makes Steam skip its own 'Processing Vulkan shaders' pass."""
+    """Replayable pipeline databases. Excludes whitelists, the replayer
+    ledger, and driver caches (mesa_shader_cache_sf/**)."""
+    out = []
     for lib in library_folders(root):
         base = lib / "shadercache" / str(appid) / "fozpipelinesv6"
         if not base.is_dir():
             continue
-        hits = sorted(base.glob("steamapprun_pipeline_cache*/steam_pipeline_cache.foz"))
-        if hits:
-            return str(hits[-1])
-        flat = base / "steamapprun_pipeline_cache.foz"
-        if flat.is_file():
-            return str(flat)
-    return None
+        for p in base.rglob("*.foz"):
+            if FOZ_INPUT_RE.match(p.name) and p.stat().st_size > 0:
+                out.append(str(p))
+    return sorted(set(out))
+
+
+def find_replayer_cache(root, appid):
+    """Steam's replay ledger (replay_cache.<hash>.foz). Passing this to
+    fossilize_replay records our work where Steam looks, so its own pass
+    finds the pipelines already done. Newest wins if several exist."""
+    hits = []
+    for lib in library_folders(root):
+        base = lib / "shadercache" / str(appid) / "fozpipelinesv6"
+        if not base.is_dir():
+            continue
+        for p in base.rglob("*.foz"):
+            if FOZ_LEDGER_RE.match(p.name):
+                hits.append(p)
+    if not hits:
+        return None
+    hits.sort(key=lambda p: p.stat().st_mtime)
+    return str(hits[-1])
 
 
 def foz_fingerprint(foz_files):

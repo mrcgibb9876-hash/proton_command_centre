@@ -40,7 +40,7 @@ def make_mock_steam(base: Path) -> Path:
             + struct.pack("<I", 0x00010000)
             + struct.pack("<II", (310 << 16) | 3, 0) + b"\x00" * 100)
     (root / "steamapps/common/TestGame/Engine/nvngx_dlss.dll").write_bytes(blob)
-    (root / "steamapps/shadercache/12345/fozpipelinesv6/steam_pipeline.foz").write_bytes(b"foz")
+    (root / "steamapps/shadercache/12345/fozpipelinesv6/steam_pipeline_cache.foz").write_bytes(b"foz")
     return root
 
 
@@ -146,7 +146,7 @@ class PCCTests(unittest.TestCase):
         self.assertEqual(st["stale_reason"], "driver changed")
         pcc.driver_version = lambda: "580.65.06"
         # foz change flags outdated but keeps compiled
-        foz = self.root / "steamapps/shadercache/12345/fozpipelinesv6/steam_pipeline.foz"
+        foz = self.root / "steamapps/shadercache/12345/fozpipelinesv6/steam_pipeline_cache.foz"
         foz.write_bytes(b"changed")
         os.utime(foz, (time.time() + 10, time.time() + 10))
         st = pcc.compiled_status(self.root, appid)
@@ -210,18 +210,34 @@ class PCCTests(unittest.TestCase):
 
     def test_smart_cache_clear_keeps_recordings(self):
         cache = self.root / "steamapps/shadercache/12345"
-        (cache / "steam_pipeline_cache.foz").write_bytes(b"compiled")
+        (cache / "compiled_artifact.foz").write_bytes(b"compiled")
         r = pcc.clear_cache(self.root, "12345", keep_recordings=True)
         self.assertTrue(
-            (cache / "fozpipelinesv6/steam_pipeline.foz").exists())
-        self.assertFalse((cache / "steam_pipeline_cache.foz").exists())
+            (cache / "fozpipelinesv6/steam_pipeline_cache.foz").exists())
+        self.assertFalse((cache / "compiled_artifact.foz").exists())
         self.assertEqual(r["kept_recordings"], 1)
 
-    def test_whitelist_foz_excluded(self):
-        wl = self.root / "steamapps/shadercache/12345/fozpipelinesv6/whitelist.foz"
-        wl.write_bytes(b"x")
+    def test_foz_classification_real_layout(self):
+        """Pipelines live inside steamapprun_pipeline_cache.<hash>/ dirs too;
+        whitelists, the replay ledger, and driver caches are never replayed."""
+        fp = self.root / "steamapps/shadercache/12345/fozpipelinesv6"
+        h = fp / "steamapprun_pipeline_cache.3554f158047e28bf"
+        h.mkdir(parents=True, exist_ok=True)
+        (h / "steam_pipeline_cache.foz").write_bytes(b"x")
+        (h / "steamapprun_pipeline_cache.2db00e3ed998437d.1.foz").write_bytes(b"x")
+        (h / "steam_pipeline_cache_whitelist.foz").write_bytes(b"w")
+        (h / "replay_cache.8652dd52d95f2f26.foz").write_bytes(b"L")
+        rad = (self.root / "steamapps/shadercache/12345/mesa_shader_cache_sf/a/RADV")
+        rad.mkdir(parents=True)
+        (rad / "foz_cache.foz").write_bytes(b"d")
         foz = pcc.find_foz(self.root, "12345")
-        self.assertTrue(all("whitelist" not in f for f in foz))
+        names = [Path(f).name for f in foz]
+        self.assertIn("steamapprun_pipeline_cache.2db00e3ed998437d.1.foz", names)
+        self.assertTrue(all("whitelist" not in n for n in names))
+        self.assertTrue(all(not n.startswith("replay_cache") for n in names))
+        self.assertTrue(all("mesa_shader_cache" not in f for f in foz))
+        self.assertTrue(pcc.find_replayer_cache(self.root, "12345")
+                        .endswith("replay_cache.8652dd52d95f2f26.foz"))
 
     def test_skip_list(self):
         self.assertIn("1493710", pcc.SKIP_APPIDS)
@@ -289,7 +305,7 @@ class PCCTests(unittest.TestCase):
     def test_compiled_survives_new_pipeline_data(self):
         pcc.mark_compiled(self.root, "12345")
         foz = (self.root /
-               "steamapps/shadercache/12345/fozpipelinesv6/steam_pipeline.foz")
+               "steamapps/shadercache/12345/fozpipelinesv6/steam_pipeline_cache.foz")
         foz.write_bytes(b"grown")
         os.utime(foz, (time.time() + 5, time.time() + 5))
         st = pcc.compiled_status(self.root, "12345")
@@ -490,10 +506,11 @@ class PCCTests(unittest.TestCase):
         base = self.root / "steamapps/shadercache/12345/fozpipelinesv6"
         ledger_dir = base / "steamapprun_pipeline_cache.abc123"
         ledger_dir.mkdir()
-        ledger = ledger_dir / "steam_pipeline_cache.foz"
+        (ledger_dir / "steam_pipeline_cache.foz").write_bytes(b"src")
+        ledger = ledger_dir / "replay_cache.deadbeef.foz"
         ledger.write_bytes(b"ledger")
         srcs = pcc.find_foz(self.root, "12345")
-        self.assertTrue(all("steamapprun" not in s for s in srcs))
+        self.assertTrue(any("steamapprun_pipeline_cache.abc123" in s for s in srcs))
         self.assertEqual(pcc.find_replayer_cache(self.root, "12345"),
                          str(ledger))
         calls = []
