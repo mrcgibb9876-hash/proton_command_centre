@@ -24,7 +24,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.3.9"
+VERSION = "1.4.0"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -492,17 +492,21 @@ def list_games(root):
             if appid in SKIP_APPIDS or (name and SKIP_NAME_RE.match(name)):
                 continue
             install_path = lib / "common" / (installdir or "")
-            flags = int(app.get("StateFlags") or 0)
+            flags = int(ci_get(app, "StateFlags") or 0)
             downloaded = int(ci_get(app, "BytesDownloaded") or 0)
             to_download = int(ci_get(app, "BytesToDownload") or 0)
+            # Only treat as "installing" when there is real pending work:
+            # a missing/odd StateFlags must never mean 'forever downloading'.
+            installing = (flags != 4 and to_download > 0
+                          and downloaded < to_download)
             games.append({
                 "appid": appid,
                 "name": name or installdir or appid,
                 "install_path": str(install_path),
                 "installed": install_path.is_dir(),
-                "fully_installed": flags == 4,
+                "fully_installed": not installing,
                 "download_pct": round(100 * downloaded / to_download, 1)
-                                if to_download and flags != 4 else None,
+                                if installing else None,
                 "size_bytes": int(ci_get(app, "SizeOnDisk") or 0),
                 "library": str(lib),
             })
@@ -1062,6 +1066,22 @@ def fetch_owned_games(root, force=False):
                 "error": f"Couldn't reach steamcommunity.com: {e}"}
 
 
+
+def install_progress(root):
+    """Cheap poll: manifest-only install state for every game."""
+    out = []
+    for g in list_games(root):
+        out.append({
+            "appid": g["appid"],
+            "name": g["name"],
+            "installed": g["installed"],
+            "fully_installed": g["fully_installed"],
+            "download_pct": g["download_pct"],
+            "size_bytes": g["size_bytes"],
+        })
+    return out
+
+
 def install_game(appid):
     exe = shutil.which("steam")
     if not exe:
@@ -1554,6 +1574,22 @@ def owned_games(root, force=False):
     return out
 
 
+
+def install_progress(root):
+    """Cheap poll: manifest-only install state for every game."""
+    out = []
+    for g in list_games(root):
+        out.append({
+            "appid": g["appid"],
+            "name": g["name"],
+            "installed": g["installed"],
+            "fully_installed": g["fully_installed"],
+            "download_pct": g["download_pct"],
+            "size_bytes": g["size_bytes"],
+        })
+    return out
+
+
 def install_game(appid):
     exe = shutil.which("steam")
     if not exe:
@@ -2019,6 +2055,8 @@ class Handler(BaseHTTPRequestHandler):
                 state.setdefault("dlss_seen", {})[m.group(1)] = bool(dlls)
                 save_state(state)
                 self._json({"dlls": dlls})
+            elif self.path == "/api/progress":
+                self._json({"games": install_progress(root)})
             elif self.path == "/api/owned_games":
                 self._json({"games": owned_games(root)})
             elif self.path == "/api/steam/shader_settings":

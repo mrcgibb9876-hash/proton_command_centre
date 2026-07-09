@@ -557,6 +557,22 @@ class PCCTests(unittest.TestCase):
                         (here / "PKGBUILD").read_text(), _re.M).group(1)
         self.assertEqual(be, pk, "PKGBUILD pkgver must match code version")
 
+    def test_install_progress_states(self):
+        m = self.root / "steamapps/appmanifest_999111.acf"
+        (self.root / "steamapps/common/DL").mkdir(parents=True, exist_ok=True)
+        m.write_text('"AppState"\n{\n\t"appid"\t\t"999111"\n'
+                     '\t"name"\t\t"DL Game"\n\t"installdir"\t\t"DL"\n'
+                     '\t"StateFlags"\t\t"1026"\n'
+                     '\t"BytesDownloaded"\t\t"6400000000"\n'
+                     '\t"BytesToDownload"\t\t"10000000000"\n}\n')
+        g = {x["appid"]: x for x in pcc.install_progress(self.root)}["999111"]
+        self.assertEqual(g["download_pct"], 64.0)
+        self.assertFalse(g["fully_installed"])
+        # a manifest with no pending bytes is never "installing"
+        done = {x["appid"]: x for x in pcc.install_progress(self.root)}["12345"]
+        self.assertTrue(done["fully_installed"])
+        self.assertIsNone(done["download_pct"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
