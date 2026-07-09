@@ -544,6 +544,19 @@ class PCCTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             pcc.set_steam_shader_setting(self.root, "/etc/passwd", "a/b", 0)
 
+    def test_backend_and_frontend_versions_match(self):
+        """Guard: a missed version bump shipped 1.3.7 code labelled 1.3.0."""
+        import re as _re
+        here = Path(__file__).resolve().parent.parent
+        be = _re.search(r'^VERSION = "([\d.]+)"',
+                        (here / "pcc.py").read_text(), _re.M).group(1)
+        fe = _re.search(r'FRONTEND_VERSION="([\d.]+)"',
+                        (here / "index.html").read_text()).group(1)
+        self.assertEqual(be, fe, "pcc.py and index.html versions must match")
+        pk = _re.search(r'^pkgver=([\d.]+)',
+                        (here / "PKGBUILD").read_text(), _re.M).group(1)
+        self.assertEqual(be, pk, "PKGBUILD pkgver must match code version")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
