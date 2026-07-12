@@ -166,6 +166,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 .chip.g{color:var(--dlss);border-color:var(--dlss)}
 .chip.a{color:var(--cache);border-color:var(--cache)}
 .chip.m{color:var(--muted);border-color:var(--line)}
+.chip.bad{color:#ff5d5d;border-color:#ff5d5d}
 .item .path{color:var(--muted);font-size:11.5px;word-break:break-all;margin-top:4px}
 .bar{height:6px;background:var(--line);border-radius:999px;overflow:hidden;margin-top:10px;display:none}
 .bar.show{display:block}
@@ -177,7 +178,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 <header>
   <h1>Proton <span>//</span> Command Center</h1>
   <input id="search" type="text" placeholder="Search your library…" autocomplete="off">
-  <button class="btn violet" id="compileAll">Compile all</button>
+  <button class="btn" id="hwBtn" title="System &amp; MangoHud">🖥</button>
   <button class="btn" id="settingsBtn" aria-label="Settings" title="Settings">⚙</button>
   <div id="steamState">checking…</div>
 </header>
@@ -238,32 +239,17 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
     <div class="warn" id="steamWarn">Steam is running — saving will close it cleanly first (it overwrites launch options on exit otherwise).</div>
     <div class="section">
       <div class="row">
-        <button class="btn violet" id="autoTuneBtn">✨ Auto-tune this game</button>
-        <span class="note">Detects the engine, checks VRAM, applies known-good settings</span>
+        <button class="btn violet" id="autoTuneBtn">🔍 ProtonDB check</button>
+        <span id="pdbBadge"></span>
       </div>
-      <div id="tuneResult" style="margin-top:10px"></div>
     </div>
     <div class="section">
       <h3>Compatibility tool (Proton)</h3>
       <div class="row">
         <select id="compatSel" style="flex:1"></select>
-        <button class="btn primary" id="compatSave">Apply</button>
       </div>
-      <p class="note">Whatever's installed shows up here — Proton-CachyOS, GE-Proton, official builds.
-        Applying closes Steam cleanly if it's running (this lives in config.vdf).</p>
-    </div>
-    <div class="section">
-      <h3>Preset</h3>
-      <div class="row">
-        <select id="preset">
-          <option value="">— pick a starting point —</option>
-          <option value="cachyos">CachyOS baseline (Wayland · HDR · NTSync · game-performance)</option>
-          <option value="ue5">UE5 anti-stutter (NVAPI · NTSync · game-performance)</option>
-          <option value="fgmax">Max smoothness (4x FG · Reflex · NGX updater)</option>
-          <option value="ace">Anti-cheat spoof (STEAMDECK=1)</option>
-          <option value="clean">Minimal (%command% only)</option>
-        </select>
-      </div>
+      <p class="note">Proton-CachyOS, GE-Proton, official builds — whatever's installed.
+        Saved together with the launch string by the one Save button below.</p>
     </div>
     <div class="section">
       <h3>Toggles</h3>
@@ -339,10 +325,11 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
       <p class="note">Edit freely — toggles rebuild it, manual edits stick until you change a toggle.</p>
     </div>
     <div class="row">
-      <button class="btn primary" id="saveLaunch">Save to Steam</button>
+      <button class="btn primary" id="saveLaunch">Save all to Steam</button>
       <button class="btn" id="copyLaunch">Copy</button>
       <button class="btn" id="startSteam" hidden>Start Steam</button>
     </div>
+    <p class="note">One save writes the Proton version and the launch string together, closing Steam once.</p>
   </div>
 
   <!-- DLSS -->
@@ -372,31 +359,44 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
   <!-- CACHE -->
   <div class="pane" id="pane-cache">
     <div class="section">
-      <h3>Steam's own shader processing</h3>
-      <div id="steamShader"><p class="note">Checking…</p></div>
-      <p class="note">PCC precompiles on demand with progress and benchmarks. Turning Steam's own
-        pass off stops the "Processing Vulkan shaders" screen at launch — precompile here instead.</p>
+      <h3>Shader cache optimisation (global)</h3>
+      <div class="toggle">
+        <div><b>NVIDIA shader disk cache</b><small>__GL_SHADER_DISK_CACHE (+ path, 10 GiB, no auto-purge) written to /etc/environment for all games. Persists compiled shaders across runs. DXVK's own cache vars are obsolete on modern Proton, so they're not set.</small></div>
+        <label class="switch"><input type="checkbox" id="shaderEnvToggle"><em></em></label>
+      </div>
+      <p class="note" id="shaderEnvNote">Applies to every game. Needs your password (writes a system file) and a re-login to take effect.</p>
     </div>
     <div class="section">
-      <h3>Steam shader cache</h3>
+      <h3>Shaders</h3>
       <div id="cacheList"><p class="note">Checking…</p></div>
-    </div>
-    <div class="section">
-      <h3>Actions</h3>
-      <div class="row">
-        <button class="btn amber" id="precompileBtn">Precompile shaders (Fossilize)</button>
-        <button class="btn danger" id="clearCacheBtn">Clear compiled cache</button>
-        <button class="btn danger" id="clearAllBtn">Delete everything</button>
+      <div class="row" style="margin-top:14px">
+        <button class="btn violet" id="fixShadersBtn" style="font-size:15px;padding:12px 22px">
+          ⚡ Compile shaders &amp; stop Steam's pass</button>
       </div>
-      <p class="note">"Clear compiled cache" keeps the fozpipelinesv6 recordings — they're the
-        source data for precompiling. "Delete everything" removes those too.</p>
-      <div class="row" style="margin-top:10px">
-        <label class="note" for="devIdx">GPU device index</label>
-        <select id="devIdx"><option>0</option><option>1</option><option>2</option></select>
-      </div>
-      <p class="note">Device index 0 is usually the dGPU — same <code>--device-index</code> flag as Stutterless.</p>
+      <p class="note" id="fixShadersHint">Compiles this game's shaders here, then turns off Steam's own
+        "Processing Vulkan shaders" screen so it doesn't redo the work at launch.</p>
       <div class="bar" id="fozBar"><i></i></div>
       <p class="note" id="fozDetail"></p>
+    </div>
+    <div class="section">
+      <button class="btn" id="advToggle" style="font-size:12px">▸ Advanced</button>
+      <div id="advPanel" style="display:none;margin-top:12px">
+        <h3>Steam's background processing</h3>
+        <div id="steamShader"><p class="note">Checking…</p></div>
+        <h3 style="margin-top:18px">Manual actions</h3>
+        <div class="row">
+          <button class="btn amber" id="precompileBtn">Precompile only</button>
+          <button class="btn danger" id="clearCacheBtn">Clear compiled cache</button>
+          <button class="btn danger" id="clearAllBtn">Delete everything</button>
+        </div>
+        <p class="note">"Clear compiled cache" keeps the fozpipelinesv6 recordings (the source data);
+          "Delete everything" removes those too.</p>
+        <div class="row" style="margin-top:10px">
+          <label class="note" for="devIdx">GPU device index</label>
+          <select id="devIdx"><option>0</option><option>1</option><option>2</option></select>
+        </div>
+        <p class="note">Device index 0 is usually the dGPU.</p>
+      </div>
     </div>
   </div>
 
@@ -421,11 +421,21 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
   </div>
 </aside>
 
+<div id="hwOverlay" style="position:fixed;inset:0;background:rgba(0,0,0,.55);opacity:0;pointer-events:none;transition:opacity .15s;z-index:44"></div>
+<aside id="hwPanel" style="position:fixed;top:0;right:0;bottom:0;height:100dvh;width:min(640px,100%);
+  background:var(--panel);border-left:1px solid var(--line);transform:translateX(102%);
+  transition:transform .18s ease;z-index:45;display:flex;flex-direction:column">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--line)">
+    <h2 style="font-size:18px">System &amp; MangoHud</h2>
+    <button id="hwClose" style="width:34px;height:34px;border-radius:50%;background:var(--panel2)">✕</button>
+  </div>
+  <div style="flex:1;overflow-y:auto;padding:20px" id="hwBody"><p class="note">Detecting hardware…</p></div>
+</aside>
 <div class="toast" id="toast"></div>
 
 <script>
 "use strict";
-const FRONTEND_VERSION="1.4.0";
+const FRONTEND_VERSION="1.9.1";
 const $=s=>document.querySelector(s);
 const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
 const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
@@ -441,29 +451,13 @@ function toast(msg,err){const t=$("#toast");t.textContent=msg;t.className="toast
 
 /* ---------- launch string builder ---------- */
 const TOGGLES=[
- {id:"wayland",label:"Native Wayland",hint:"Still opt-in (not default yet) — better latency/pacing, HDR without Gamescope, but breaks Steam Overlay",env:"PROTON_ENABLE_WAYLAND=1"},
- {id:"nodecoration",label:"No WM decorations",hint:"PROTON_NO_WM_DECORATION=1 — fixes erratic mouse / borderless issues under Wayland",env:"PROTON_NO_WM_DECORATION=1"},
- {id:"nosteaminput",label:"Bypass Steam Input",hint:"PROTON_NO_STEAMINPUT=1 — fixes controllers not responding under Wayland",env:"PROTON_NO_STEAMINPUT=1"},
- {id:"dlssupgrade",label:"Proton DLSS upgrade",hint:"PROTON_DLSS_UPGRADE=1 — Proton keeps DLSS DLLs at latest (alternative to manual swaps)",env:"PROTON_DLSS_UPGRADE=1"},
- {id:"no32bit",label:"64-bit NVIDIA libs only",hint:"PROTON_NVIDIA_LIBS_NO_32BIT=1 — fixes perf issues on RTX 40/50 series",env:"PROTON_NVIDIA_LIBS_NO_32BIT=1"},
+ {id:"wayland",label:"Native Wayland",hint:"PROTON_ENABLE_WAYLAND=1 — better latency/pacing and HDR without Gamescope, but breaks the Steam Overlay",env:"PROTON_ENABLE_WAYLAND=1"},
  {id:"hdr",label:"HDR",hint:"PROTON_ENABLE_HDR=1 DXVK_HDR=1 — disable the in-game HDR toggle if it conflicts",env:"PROTON_ENABLE_HDR=1 DXVK_HDR=1"},
- {id:"ntsync",label:"NTSync",hint:"PROTON_USE_NTSYNC=1 — already default on Proton-CachyOS 11",env:"PROTON_USE_NTSYNC=1"},
- {id:"nvapi",label:"NVAPI",hint:"PROTON_ENABLE_NVAPI=1 — needed for DLSS / Reflex in some titles",env:"PROTON_ENABLE_NVAPI=1"},
- {id:"steamdeck",label:"Steam Deck spoof",hint:"STEAMDECK=1 — helps some anti-cheat (ACE) accept Linux",env:"STEAMDECK=1"},
- {id:"mangohud",label:"MangoHud overlay",hint:"Adds the mangohud wrapper",wrap:"mangohud"},
- {id:"gameperf",label:"game-performance",hint:"CachyOS power-profile wrapper",wrap:"game-performance"},
- {id:"smooth",label:"Smooth Motion",hint:"Driver-level frame generation for games without DLSS FG (RTX 40/50, recent drivers)",env:"NVPRESENT_ENABLE_SMOOTH_MOTION=1"},
- {id:"reflex",label:"NVIDIA Reflex (Vulkan)",hint:"DXVK_NVAPI_VKREFLEX=1 — needs the dxvk-nvapi Reflex layer; pairs well with FG",env:"DXVK_NVAPI_VKREFLEX=1"},
- {id:"ngxupd",label:"NGX auto-updater",hint:"PROTON_ENABLE_NGX_UPDATER=1 — driver keeps DLSS DLLs current (may override manual swaps)",env:"PROTON_ENABLE_NGX_UPDATER=1"},
- {id:"dlsshud",label:"DLSS indicator overlay",hint:"On-screen proof of which DLSS preset/FG mode is active",env:"DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS=DLSSIndicator=1024,DLSSGIndicator=2"},
+ {id:"mangohud",label:"MangoHud overlay",hint:"Adds the mangohud wrapper — first enable writes PCC's custom horizontal overlay (orange labels, frametime graph, dGPU-pinned)",wrap:"mangohud"},
+ {id:"gameperf",label:"game-performance",hint:"CachyOS wrapper: performance power profile + screensaver inhibit for the game",wrap:"game-performance"},
+ {id:"steamdeckon",label:"Steam Deck spoof (=1)",hint:"SteamDeck=1 — spoofs Deck mode; helps some anti-cheat (ACE) accept Linux",env:"SteamDeck=1"},
+ {id:"steamdeckoff",label:"Force Steam Deck off (=0)",hint:"SteamDeck=0 — explicitly disables Deck mode when something else enabled it",env:"SteamDeck=0"},
 ];
-const PRESETS={
- cachyos:{on:["wayland","hdr","ntsync","gameperf"],dlss:"render_preset_m"},
- ue5:{on:["nvapi","ntsync","gameperf"],dlss:""},
- fgmax:{on:["nvapi","reflex","ngxupd","gameperf"],dlss:"render_preset_latest",fg:"3"},
- ace:{on:["steamdeck"],dlss:""},
- clean:{on:[],dlss:""},
-};
 let manualEdit=false;
 
 function renderToggles(){
@@ -472,16 +466,35 @@ function renderToggles(){
       <div><b>${t.label}</b><small>${t.hint}</small></div>
       <label class="switch"><input type="checkbox" data-id="${t.id}"><em></em></label>
     </div>`).join("");
-  $("#toggles").addEventListener("change",()=>{manualEdit=false;buildString()});
+  $("#toggles").addEventListener("change",async(e)=>{
+    // SteamDeck=1 and =0 are opposites — turning one on clears the other
+    if(e.target&&e.target.checked){
+      const pair={steamdeckon:"steamdeckoff",steamdeckoff:"steamdeckon"};
+      const other=pair[e.target.dataset.id];
+      if(other){const o=document.querySelector(`#toggles input[data-id="${other}"]`);if(o)o.checked=false;}
+    }
+    manualEdit=false;buildString();
+    // when the MangoHud toggle is switched ON, ensure our custom config exists
+    if(e.target&&e.target.dataset.id==="mangohud"&&e.target.checked){
+      try{
+        const hw=await api("/api/hardware");
+        if(!hw.config_exists){
+          await post("/api/mangohud/apply",{preset:"reference"});
+          toast("MangoHud overlay configured (PCC custom layout)");
+        }
+      }catch(err){/* mangohud may not be installed; the wrapper still gets added */}
+    }
+  });
 }
 function buildString(){
   if(manualEdit)return;
   const on=new Set([...document.querySelectorAll("#toggles input:checked")].map(i=>i.dataset.id));
-  const env=[],wraps=[];
+  const env=[],wraps=[],gameArgs=[];
   for(const t of TOGGLES){
     if(!on.has(t.id))continue;
     if(t.env)env.push(t.env);
     if(t.wrap)wraps.push(t.wrap);
+    if(t.arg)gameArgs.push(t.arg);
   }
   const srMode=$("#srMode").value,srPreset=$("#dlssPreset").value,
         fg=$("#fgMode").value,rr=$("#rrPreset").value,cap=$("#fpsCap").value;
@@ -501,7 +514,28 @@ function buildString(){
   if(cap)env.push("DXVK_FRAME_RATE="+cap);
   const extraEnv=$("#extraEnv").value.trim();
   if(extraEnv)env.push(extraEnv);
-  const parts=[...env,...wraps,"%command%"];
+  // Merge duplicate KEY= entries into one. VKD3D_CONFIG (and DXVK_CONFIG) take
+  // comma-separated lists, so dxr + upload_hvv must become VKD3D_CONFIG=dxr,upload_hvv
+  // rather than two clashing assignments where the last wins.
+  const LIST_KEYS=new Set(["VKD3D_CONFIG","DXVK_CONFIG"]);
+  const merged=[],seen={};
+  for(const e of env){
+    const eq=e.indexOf("=");
+    if(eq<0){merged.push(e);continue;}
+    const k=e.slice(0,eq),v=e.slice(eq+1);
+    if(k in seen){
+      if(LIST_KEYS.has(k)){
+        // append to the existing list value
+        merged[seen[k]]=k+"="+merged[seen[k]].slice(k.length+1)+","+v;
+      }else{
+        merged[seen[k]]=e;   // non-list: last value wins (overwrite in place)
+      }
+    }else{
+      seen[k]=merged.length;merged.push(e);
+    }
+  }
+  const parts=[...merged,...wraps,"%command%"];
+  if(gameArgs.length)parts.push(gameArgs.join(" "));
   const args=$("#extraArgs").value.trim();
   if(args)parts.push(args);
   $("#launchStr").value=parts.join(" ");
@@ -512,20 +546,11 @@ $("#srMode").addEventListener("change",()=>{
 });
 ["#dlssPreset","#srRatio","#fgMode","#rrPreset","#fpsCap","#extraEnv","#extraArgs"].forEach(s=>$(s).addEventListener("input",()=>{manualEdit=false;buildString()}));
 $("#launchStr").addEventListener("input",()=>{manualEdit=true});
-$("#preset").addEventListener("change",e=>{
-  const p=PRESETS[e.target.value];if(!p)return;
-  document.querySelectorAll("#toggles input").forEach(i=>i.checked=p.on.includes(i.dataset.id));
-  $("#dlssPreset").value=p.dlss;
-  $("#fgMode").value=p.fg||"";
-  $("#srMode").value="";$("#srRatio").value="";$("#rrPreset").value="";$("#fpsCap").value="";
-  manualEdit=false;buildString();
-});
-
 /* naive reverse-parse: light the toggles a saved string matches */
 function loadStringIntoUI(str){
   document.querySelectorAll("#toggles input").forEach(i=>{
     const t=TOGGLES.find(t=>t.id===i.dataset.id);
-    i.checked=!!(t.env&&t.env.split(" ").every(e=>str.includes(e))||t.wrap&&new RegExp("\\b"+t.wrap+"\\b").test(str));
+    i.checked=!!(t.env&&t.env.split(" ").every(e=>str.includes(e))||t.wrap&&new RegExp("\\b"+t.wrap+"\\b").test(str)||t.arg&&new RegExp("(^|\\s)"+t.arg.replace(/[-]/g,"\\$&")+"(\\s|$)").test(str));
   });
   const sr=str.match(/SR_OVERRIDE_RENDER_PRESET_SELECTION=(\S+)/);
   $("#dlssPreset").value=sr?sr[1]:"";
@@ -595,6 +620,7 @@ function renderGrid(filter=""){
         <div class="meta"><b>${esc(g.name)}</b><small>${g._uninstalled?"not installed":((statusById[g.appid]||{}).installing?("installing"+((statusById[g.appid]||{}).pct?" · "+(statusById[g.appid]||{}).pct+"%":"…")):(g.size_bytes?fmtMB(g.size_bytes):"—"))}</small></div>
         ${g._uninstalled?`<button class="installbtn" data-install="${g.appid}">Install</button>`:`<button class="playbtn" data-play="${g.appid}" title="Play">▶</button>`}
       </div>
+      <div class="cardbar"><i></i></div>
     </div>`).join("");
 }
 $("#search").addEventListener("input",e=>renderGrid(e.target.value));
@@ -677,7 +703,7 @@ async function openGame(appid){
     loadStringIntoUI(lo.value||"");
     statusById[appid]={...statusById[appid],launch:!!lo.value};
   }catch(e){loadStringIntoUI("")}
-  loadLibrary().then(()=>loadDLSS(appid));loadCache(appid);loadBench(appid);loadCompat(appid);loadSteamShader();
+  loadLibrary().then(()=>loadDLSS(appid));loadCache(appid);loadBench(appid);loadCompat(appid);loadSteamShader();loadShaderEnv();loadCachedPdb(appid);
 }
 
 async function loadDLSS(appid){
@@ -692,7 +718,7 @@ async function loadDLSS(appid){
       return `
       <div class="item">
         <div class="top"><b>${dll.label}</b>
-          <span class="chip g">${fGen(dll.version)} · ${fShort(dll.version)}</span>
+          <span class="chip g">${fShort(dll.version)}</span>
           ${upd?`<span class="chip a">update available · ${fShort(newest.version)}</span>`:""}
           ${dll.backed_up?'<span class="chip m">backup saved</span>':""}
         </div>
@@ -711,7 +737,7 @@ async function loadDLSS(appid){
       if(u!==undefined){
         try{
           const res=await post("/api/dlss/swap",{game_dll:window._gameDlls[u].path,library_dll:e.target.dataset.lib});
-          toast("Updated to "+fGen(res.new_version)+" "+fShort(res.new_version));loadDLSS(appid);
+          toast("Updated to "+fShort(res.new_version));loadDLSS(appid);
         }catch(err){toast(err.message,true)}
         return;
       }
@@ -736,7 +762,7 @@ async function loadLibrary(){
     const d=await api("/api/dlss/library");libDlls=d.dlls;
     $("#dlssLib").innerHTML=d.dlls.length?d.dlls.map(x=>`
       <div class="item"><div class="top"><b class="mono">${esc(x.name)}</b>
-        <span class="chip g">${fGen(x.version)} · ${fShort(x.version)}</span></div></div>`).join("")
+        <span class="chip g">${fShort(x.version)}</span></div></div>`).join("")
       :'<p class="note">Library is empty — download or import a DLL below.</p>';
     fillSwapSelects();
   }catch(e){}
@@ -746,7 +772,7 @@ function fillSwapSelects(){
     const dll=window._gameDlls?.[sel.dataset.swap];if(!dll)return;
     const opts=libDlls.filter(x=>x.kind===dll.kind);
     sel.innerHTML='<option value="">— library version —</option>'+
-      opts.map(o=>`<option value="${esc(o.path)}">${fGen(o.version)} · ${fShort(o.version)}</option>`).join("");
+      opts.map(o=>`<option value="${esc(o.path)}">${fShort(o.version)}</option>`).join("");
   });
 }
 document.querySelectorAll("[data-dl]").forEach(btn=>btn.addEventListener("click",async()=>{
@@ -805,6 +831,52 @@ $("#clearAllBtn").addEventListener("click",async()=>{
     loadCache(current.appid);
   }catch(e){toast(e.message,true)}
 });
+async function disableSteamBackgroundShaders(){
+  try{
+    const d=await api("/api/steam/shader_settings");
+    if(!d.found)return {ok:false,reason:"defaults"};
+    let changed=0;
+    for(const f of d.files){
+      for(const k of f.keys){
+        if(/background|precach/i.test(k.key) && k.value==="1"){
+          await post("/api/steam/shader_settings",
+            {file:f.file,path:k.path,value:0,close_steam:true});
+          changed++;
+        }
+      }
+    }
+    return {ok:true,changed};
+  }catch(e){return {ok:false,reason:e.message}}
+}
+
+$("#advToggle")?.addEventListener("click",()=>{
+  const p=$("#advPanel");const open=p.style.display!=="none";
+  p.style.display=open?"none":"block";
+  $("#advToggle").textContent=(open?"▸":"▾")+" Advanced";
+});
+
+$("#fixShadersBtn")?.addEventListener("click",async()=>{
+  if(!current)return;
+  const btn=$("#fixShadersBtn");btn.disabled=true;
+  $("#fozDetail").textContent="Compiling shaders…";
+  try{
+    const {task}=await post(`/api/game/${current.appid}/cache/precompile`,
+      {device_index:0});
+    trackTask(task,"#fozBar",async()=>{
+      $("#fozDetail").textContent="Shaders compiled. Turning off Steam's pass…";
+      const r=await disableSteamBackgroundShaders();
+      if(r.ok && r.changed>0)
+        $("#fozDetail").textContent="✓ Done — shaders compiled and Steam's pass turned off. Launch the game; no more processing screen.";
+      else if(r.reason==="defaults")
+        $("#fozDetail").textContent="✓ Shaders compiled. To stop Steam redoing them: Steam → Settings → Shader Pre-Caching → untick background processing (once), then click this again.";
+      else
+        $("#fozDetail").textContent="✓ Shaders compiled. (Couldn't change Steam's setting automatically — see Advanced.)";
+      loadCache(current.appid);loadSteamShader();
+      btn.disabled=false;
+    },"#fozDetail");
+  }catch(e){toast(e.message,true);btn.disabled=false;$("#fozDetail").textContent=""}
+});
+
 $("#precompileBtn").addEventListener("click",async()=>{
   if(!current)return;
   try{
@@ -859,30 +931,56 @@ async function loadSteamShader(){
   }catch(e){$("#steamShader").innerHTML=`<p class="note">${esc(e.message)}</p>`}
 }
 
-/* ---------- auto-tune ---------- */
+/* ---------- ProtonDB check ---------- */
+const PDB_CACHE={};   // appid -> {tier,total} so switching games doesn't bleed
+const PDB_TIERS={
+  platinum:{label:"Platinum",stars:5,color:"#b9c2d0",bg:"rgba(185,194,208,.15)"},
+  gold:    {label:"Gold",    stars:4,color:"#ffd15c",bg:"rgba(255,209,92,.15)"},
+  silver:  {label:"Silver",  stars:3,color:"#c8c8c8",bg:"rgba(200,200,200,.15)"},
+  bronze:  {label:"Bronze",  stars:2,color:"#cd7f4b",bg:"rgba(205,127,75,.15)"},
+  borked:  {label:"Borked",  stars:1,color:"#ff5d5d",bg:"rgba(255,93,93,.15)"},
+  pending: {label:"Pending", stars:0,color:"#8a97a6",bg:"rgba(138,151,166,.12)"},
+};
+function pdbBadgeHtml(tier,total,appid){
+  const t=PDB_TIERS[tier]||{label:tier,stars:0,color:"#8a97a6",bg:"rgba(138,151,166,.12)"};
+  const stars=t.stars>0?"★".repeat(t.stars)+"☆".repeat(5-t.stars):"—";
+  return `<a href="https://www.protondb.com/app/${encodeURIComponent(appid)}"
+    target="_blank" rel="noopener noreferrer" title="Open ${esc(t.label)} rating on ProtonDB"
+    style="display:inline-flex;align-items:center;gap:8px;padding:5px 12px;
+    border-radius:999px;background:${t.bg};border:1px solid ${t.color};color:${t.color};
+    font-weight:600;font-size:13px;text-decoration:none;cursor:pointer;transition:filter .12s"
+    onmouseover="this.style.filter='brightness(1.2)'" onmouseout="this.style.filter='none'">
+    <b>${esc(t.label)}</b>
+    <span style="letter-spacing:1px;font-size:12px">${stars}</span>
+    <span style="font-size:11px;opacity:.7">↗</span>
+    </a>`+(total?`<span class="note" style="margin-left:8px">${total} reports</span>`:"");
+}
+function renderPdbBadge(appid){
+  const el=$("#pdbBadge");if(!el)return;
+  const c=PDB_CACHE[appid];
+  el.innerHTML = c ? (c.tier?pdbBadgeHtml(c.tier,c.total,appid):`<a href="https://www.protondb.com/app/${encodeURIComponent(appid)}" target="_blank" rel="noopener noreferrer" class="note" style="text-decoration:underline">No rating yet — view on ProtonDB ↗</a>`) : "";
+}
+async function loadCachedPdb(appid){
+  // repopulate the badge from the backend's stored rating (survives app reopen)
+  if(PDB_CACHE[appid]){renderPdbBadge(appid);return;}
+  try{
+    const d=await api(`/api/game/${appid}/protondb?cached=1`);
+    if(d&&d.tier){
+      PDB_CACHE[appid]={tier:d.tier,total:d.total||0};
+      if(current&&current.appid===appid)renderPdbBadge(appid);
+    }
+  }catch(e){/* no cached rating; leave badge empty until user checks */}
+}
 $("#autoTuneBtn").addEventListener("click",async()=>{
   if(!current)return;
-  const btn=$("#autoTuneBtn");btn.disabled=true;btn.textContent="Analysing…";
+  const appid=current.appid;
+  const btn=$("#autoTuneBtn");btn.disabled=true;btn.textContent="Checking…";
   try{
-    const d=await api(`/api/game/${current.appid}/autotune`);
-    loadStringIntoUI(d.launch_string);
-    const tierColors={platinum:"g",gold:"a",silver:"m",bronze:"m",borked:"m"};
-    $("#tuneResult").innerHTML=`
-      <div class="item">
-        <div class="top"><b>${esc(d.reasons[0]||"Analysis")}</b>
-          ${d.protondb&&d.protondb.tier?`<span class="chip ${tierColors[d.protondb.tier]||"m"}">ProtonDB: ${esc(d.protondb.tier)}</span>`:""}
-          ${d.deck_verified&&d.deck_verified.category&&d.deck_verified.category!=="Unknown"?`<span class="chip ${d.deck_verified.code>=2?"g":"m"}">Valve: Deck ${esc(d.deck_verified.category)}</span>`:""}
-          ${d.umu_fix&&d.umu_fix.exists?'<span class="chip g">community fix available (GE-Proton)</span>':""}
-          ${d.precompile_recommended?'<span class="chip a">precompile recommended</span>':""}
-          ${d.vram_mb?`<span class="chip m">${(d.vram_mb/1024).toFixed(0)} GB VRAM</span>`:""}
-        </div>
-        <div class="path">${d.reasons.slice(1).map(esc).join("<br>")}</div>
-        ${d.notes.length?`<div class="path" style="color:var(--cache);margin-top:8px">${d.notes.map(esc).join("<br>")}</div>`:""}
-        ${d.umu_fix&&d.umu_fix.exists&&d.umu_fix.actions&&d.umu_fix.actions.length?`<div class="path" style="margin-top:8px">Fix applies: ${d.umu_fix.actions.map(esc).join(" · ")}</div>`:""}
-      </div>`;
-    toast("Settings applied to the builder — review and Save");
-  }catch(e){toast(e.message,true)}
-  btn.disabled=false;btn.textContent="✨ Auto-tune this game";
+    const d=await api(`/api/game/${appid}/protondb`);
+    PDB_CACHE[appid]={tier:d&&d.tier?d.tier:null,total:d&&d.total?d.total:0};
+    if(current&&current.appid===appid)renderPdbBadge(appid);   // still same game?
+  }catch(e){$("#pdbBadge").innerHTML=`<span class="note">${esc(e.message)}</span>`}
+  btn.disabled=false;btn.textContent="🔍 ProtonDB check";
 });
 
 /* ---------- live install progress ---------- */
@@ -921,8 +1019,8 @@ async function pollProgress(){
       renderGrid($("#search").value);
       toast("Install finished");
     }
-    pollMisses = active ? 0 : pollMisses+1;
-    if(pollMisses>3)stopPolling();     // idle for ~4 cycles, stand down
+    // keep polling while visible so Steam-initiated installs are caught;
+    // the endpoint is manifest-only and cheap.
   }catch(e){stopPolling()}
 }
 function startPolling(){
@@ -972,14 +1070,96 @@ async function loadCompat(appid){
       `<option value="${esc(t.name)}" ${t.name===cur.name?"selected":""}>${esc(t.label)}${t.custom?" ★":""}</option>`).join("");
   }catch(e){$("#compatSel").innerHTML='<option value="">Steam default</option>'}
 }
-$("#compatSave").addEventListener("click",async()=>{
-  if(!current)return;
-  if(steamIsRunning&&!confirm("Steam will be closed cleanly to change the compatibility tool. Continue?"))return;
+/* compat now saved via the merged Save all button */
+
+/* ---------- global shader optimisation ---------- */
+async function loadShaderEnv(){
   try{
-    await post(`/api/game/${current.appid}/compat_tool`,{name:$("#compatSel").value,close_steam:true});
-    toast("Compatibility tool applied");refreshStatus();
-  }catch(e){toast(e.message,true)}
+    const d=await api("/api/env/shaders");
+    const t=$("#shaderEnvToggle");if(t)t.checked=d.enabled;
+  }catch(e){/* /etc/environment unreadable — leave unchecked */}
+}
+$("#shaderEnvToggle")?.addEventListener("change",async e=>{
+  const on=e.target.checked;
+  $("#shaderEnvNote").textContent="Applying (password prompt)…";
+  try{
+    const r=await post("/api/env/shaders",{enable:on});
+    $("#shaderEnvNote").textContent=on
+      ? "✓ Enabled globally. Log out and back in for it to take effect."
+      : "✓ Removed from /etc/environment. Log out and back in to clear.";
+    toast(on?"Shader cache enabled globally":"Shader cache disabled");
+  }catch(err){
+    e.target.checked=!on;
+    $("#shaderEnvNote").textContent="Couldn't write /etc/environment (cancelled or no permission).";
+    toast(err.message,true);
+  }
 });
+
+/* ---------- system & mangohud ---------- */
+let hwPreset="reference";
+function hwOpen(v){
+  $("#hwPanel").style.transform=v?"none":"translateX(102%)";
+  $("#hwOverlay").style.opacity=v?"1":"0";
+  $("#hwOverlay").style.pointerEvents=v?"auto":"none";
+  document.body.classList.toggle("locked",v);
+}
+$("#hwBtn").addEventListener("click",()=>{hwOpen(true);loadHardware()});
+$("#hwClose").addEventListener("click",()=>hwOpen(false));
+$("#hwOverlay").addEventListener("click",()=>hwOpen(false));
+
+async function loadHardware(){
+  try{
+    const d=await api("/api/mangohud?preset="+encodeURIComponent(hwPreset));
+    const hw=d.hardware;
+    $("#hwBody").innerHTML=`
+      <div class="section">
+        <h3>Detected hardware</h3>
+        <div class="item">
+          <div class="top"><b>${esc(hw.cpu)}</b><span class="chip m">${hw.cores} threads</span></div>
+        </div>
+        ${hw.gpus.map(g=>`<div class="item"><div class="top"><b>${esc(g.name)}</b>
+          <span class="chip ${g.discrete?"g":"m"}">${g.discrete?"discrete":"integrated"}</span>
+          ${g.vram_mb?`<span class="chip m">${(g.vram_mb/1024).toFixed(0)} GB</span>`:""}
+          ${g.driver?`<span class="chip m">driver ${esc(g.driver)}</span>`:""}</div>
+          <div class="path mono">${esc(g.pci_dev||"")}</div></div>`).join("")}
+        ${hw.hybrid?'<p class="note">Hybrid GPU detected — overlay stats will be pinned to the discrete card.</p>':""}
+        ${hw.mangohud?"":'<div class="item"><div class="top"><b>MangoHud not installed</b><span class="chip a">sudo pacman -S mangohud</span></div></div>'}
+      </div>
+      <div class="section">
+        <h3>Overlay preset</h3>
+        <div class="row">
+          <select id="hwPreset">
+            <option value="reference" selected>Recommended — GPU &amp; CPU name, load, temp, VRAM, FPS, frametime graph</option>
+            <option value="minimal">Minimal — FPS, GPU load, CPU load</option>
+            <option value="standard">Standard — adds RAM</option>
+            <option value="benchmark">Benchmark — adds power, I/O, percentiles</option>
+            <option value="stutter">Stutter analysis — adds histogram, throttling, present mode</option>
+          </select>
+          <label class="note"><input type="checkbox" id="hwLog"> log to PCC benchmarks</label>
+        </div>
+        <p class="note">Font: ${hw.font?esc(hw.font.split("/").pop()):"system default (install ttf-jetbrains-mono for the best look)"}
+          · toggle overlay with Shift_R+F12</p>
+      </div>
+      <div class="section">
+        <h3>Config preview</h3>
+        <textarea id="hwPreview" readonly style="min-height:220px">${esc(d.preview)}</textarea>
+        <p class="note">Writes to ${esc(hw.config_path)}${hw.config_exists?" (existing config backed up first)":""}</p>
+      </div>
+      <div class="row">
+        <button class="btn violet" id="hwApply">Apply configuration</button>
+        <button class="btn" id="hwCopy">Copy</button>
+      </div>`;
+    $("#hwPreset").value=hwPreset;
+    $("#hwPreset").addEventListener("change",e=>{hwPreset=e.target.value;loadHardware()});
+    $("#hwCopy").addEventListener("click",()=>navigator.clipboard.writeText($("#hwPreview").value).then(()=>toast("Copied")));
+    $("#hwApply").addEventListener("click",async()=>{
+      try{
+        const r=await post("/api/mangohud/apply",{preset:hwPreset,enable_logging:$("#hwLog").checked});
+        toast("MangoHud configured"+(r.backup?" — previous config backed up":""));
+      }catch(e){toast(e.message,true)}
+    });
+  }catch(e){$("#hwBody").innerHTML=`<p class="note">${esc(e.message)}</p>`}
+}
 
 /* ---------- settings ---------- */
 $("#settingsBtn").addEventListener("click",async()=>{
@@ -1015,30 +1195,6 @@ $("#artReset").addEventListener("click",async()=>{
 });
 document.addEventListener("click",e=>{
   if(!e.target.closest("#settingsPop")&&!e.target.closest("#settingsBtn"))$("#settingsPop").hidden=true;
-});
-
-/* ---------- compile all ---------- */
-$("#compileAll").addEventListener("click",async()=>{
-  const btn=$("#compileAll");btn.disabled=true;
-  try{
-    const {task}=await post("/api/precompile_all",{device_index:0,skip_compiled:true});
-    const bar=$("#globalBar i");
-    const iv=setInterval(async()=>{
-      try{
-        const t=await api("/api/tasks/"+task);
-        bar.style.width=(t.progress||0)+"%";
-        if(t.detail)btn.textContent=t.detail.length>40?t.detail.slice(0,40)+"…":t.detail;
-        if(t.status==="done"||t.status==="error"){
-          clearInterval(iv);bar.style.width="0%";btn.disabled=false;btn.textContent="Compile all";
-          toast(t.detail,t.status==="error");
-          const d=await api("/api/games");
-          games=d.games.filter(g=>g.installed);
-          seedStatus(games);
-          renderGrid($("#search").value);
-        }
-      }catch(e){clearInterval(iv);btn.disabled=false;btn.textContent="Compile all"}
-    },1000);
-  }catch(e){toast(e.message,true);btn.disabled=false}
 });
 
 /* ---------- benchmark ---------- */
@@ -1094,18 +1250,18 @@ $("#benchSave").addEventListener("click",async()=>{
 $("#saveLaunch").addEventListener("click",async()=>{
   if(!current)return;
   const btn=$("#saveLaunch");
-  if(steamIsRunning&&!confirm("Steam will be closed cleanly so the change can be saved, then you can restart it with one click. Continue?"))return;
-  btn.disabled=true;
-  if(steamIsRunning)btn.textContent="Closing Steam…";
+  const launch=$("#launchStr").value.trim();
+  const compat=$("#compatSel").value||null;
+  if(steamIsRunning&&!confirm("Steam will be closed cleanly to save. Continue?"))return;
+  btn.disabled=true;btn.textContent="Saving…";
   try{
-    const r=await post(`/api/game/${current.appid}/launch_options`,
-      {value:$("#launchStr").value,close_steam:true});
-    toast("Saved — backup at "+r.backup.split("/").pop());
-    statusById[current.appid]={...statusById[current.appid],launch:!!$("#launchStr").value.trim()};
-    renderGrid($("#search").value);
+    await post(`/api/game/${current.appid}/save`,
+      {launch_options:launch,compat_tool:compat,close_steam:true});
+    toast("Saved — Proton version + launch options written");
+    refreshStatus();
+    if(steamIsRunning)$("#startSteam").hidden=false;
   }catch(e){toast(e.message,true)}
-  btn.disabled=false;
-  refreshStatus();
+  btn.disabled=false;btn.textContent="Save all to Steam";
 });
 $("#startSteam").addEventListener("click",async()=>{
   try{await post("/api/steam/launch");toast("Starting Steam…");setTimeout(refreshStatus,3000)}
@@ -1125,7 +1281,7 @@ $("#copyLaunch").addEventListener("click",()=>{
     seedStatus(games);
     renderGrid();
     loadOwned();
-    if(anyInstalling())startPolling();
+    startPolling();   // always watch for installs (Steam-initiated too)
   }catch(e){
     $("#empty").hidden=false;
     $("#empty").textContent="Backend error: "+e.message;

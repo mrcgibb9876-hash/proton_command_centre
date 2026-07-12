@@ -45,7 +45,13 @@ def make_mock_steam(base: Path) -> Path:
 
 
 class PCCTests(unittest.TestCase):
+    _ORIGINALS = ("steam_running", "driver_version", "_nvidia_gpus", "_drm_gpus",
+                  "cpu_name", "find_font", "find_fossilize", "gpu_vram_mb",
+                  "shutdown_steam", "is_handheld", "subprocess", "MANGOHUD_DIR")
+
     def setUp(self):
+        self._saved = {n: getattr(pcc, n) for n in self._ORIGINALS
+                       if hasattr(pcc, n)}
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
         self.root = make_mock_steam(base)
@@ -63,6 +69,8 @@ class PCCTests(unittest.TestCase):
         pcc.driver_version = lambda: "580.65.06"
 
     def tearDown(self):
+        for n, v in self._saved.items():
+            setattr(pcc, n, v)
         self.tmp.cleanup()
 
     # ---- library / VDF ----
@@ -572,6 +580,148 @@ class PCCTests(unittest.TestCase):
         done = {x["appid"]: x for x in pcc.install_progress(self.root)}["12345"]
         self.assertTrue(done["fully_installed"])
         self.assertIsNone(done["download_pct"])
+
+    # ---- hardware detection + MangoHud ----
+    def test_nvidia_pci_normalisation(self):
+        class R:
+            returncode = 0
+            stdout = "RTX 5070 Laptop GPU, 00000000:01:00.0, 8188 MiB, 610.43.02\n"
+        real = pcc.subprocess.run
+        pcc.subprocess.run = lambda *a, **k: R()
+        try:
+            g = pcc._nvidia_gpus()[0]
+        finally:
+            pcc.subprocess.run = real
+        self.assertEqual(g["pci_dev"], "0000:01:00.0")
+        self.assertEqual(g["vram_mb"], 8188)
+        self.assertTrue(g["discrete"])
+
+    def test_mangohud_config_pins_discrete_gpu(self):
+        hw = {"cpu": "Test CPU", "cores": 16, "font": None, "hybrid": True,
+              "gpus": [{"name": "RTX", "vendor": "NVIDIA", "pci_dev": "0000:01:00.0",
+                        "vram_mb": 8188, "driver": "610", "discrete": True},
+                       {"name": "iGPU", "vendor": "AMD", "pci_dev": "0000:65:00.0",
+                        "vram_mb": None, "driver": None, "discrete": False}]}
+        cfg = pcc.mangohud_config("benchmark", hw)
+        self.assertIn("pci_dev=0000:01:00.0", cfg)
+        self.assertIn("legacy_layout=false", cfg)
+        self.assertIn("Test CPU", cfg)
+
+    def test_mangohud_presets_have_no_disabled_params(self):
+        """MangoHud 0.8.2 renders a column for every listed param, even =0."""
+        for name, params in pcc.MANGOHUD_PRESETS.items():
+            bad = [x for x in params if x.endswith("=0") and x != "frametime=0"]
+            self.assertFalse(bad, f"{name}: {bad}")
+
+    def test_mangohud_apply_backs_up(self):
+        pcc.MANGOHUD_DIR = Path(self.tmp.name) / "MangoHud"
+        pcc.MANGOHUD_DIR.mkdir(parents=True)
+        (pcc.MANGOHUD_DIR / "MangoHud.conf").write_text("old\n")
+        pcc._nvidia_gpus = lambda: []
+        pcc._drm_gpus = lambda: []
+        r = pcc.apply_mangohud_config("minimal")
+        self.assertTrue(Path(r["written"]).read_text().startswith("### Generated"))
+        self.assertEqual(Path(r["backup"]).read_text(), "old\n")
+
+    def test_manifest_section_mapping(self):
+        """SR/FG/RR map to the verified manifest section names."""
+        self.assertEqual(pcc.DLSS_MANIFEST_SECTION["sr"], "dlss")
+        self.assertEqual(pcc.DLSS_MANIFEST_SECTION["fg"], "dlss_g")
+        self.assertEqual(pcc.DLSS_MANIFEST_SECTION["rr"], "dlss_d")
+
+    def test_manifest_picks_highest_version(self):
+        """The manifest parser must select the newest entry by version."""
+        import io, zipfile, json as _json
+        # build a fake manifest + a fake zip served via monkeypatched helpers
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("nvngx_dlss.dll", b"MZ" + b"\x00" * 100)
+        zip_bytes = buf.getvalue()
+        manifest = {"dlss": [
+            {"version": "310.1.0.0", "version_number": 10,
+             "download_url": "http://x/old.zip"},
+            {"version": "310.5.2.0", "version_number": 99,
+             "download_url": "http://x/new.zip"},
+        ]}
+        real_json, real_bytes = pcc._gh_json, pcc._gh_bytes
+        pcc._gh_json = lambda url: manifest
+        pcc._gh_bytes = lambda url, task=None: zip_bytes
+        pcc.TASKS["t"] = {"status": "running", "progress": 0, "detail": ""}
+        try:
+            got = pcc._manifest_latest("sr", "t")
+        finally:
+            pcc._gh_json, pcc._gh_bytes = real_json, real_bytes
+        self.assertIsNotNone(got)
+        version, data = got
+        self.assertEqual(version, "310.5.2.0")   # highest version_number wins
+        self.assertTrue(data.startswith(b"MZ"))
+
+    def test_pe_version_skips_false_signature(self):
+        """Regression: a coincidental 0xFEEF04BD before the real version block
+        produced garbage like 46863.0.46863.4696. Parser must validate the
+        struct version and skip false matches."""
+        import struct as _s, tempfile as _tf
+        def make(blocks):
+            data = b"\x00" * 64
+            for struc, ms, ls in blocks:
+                data += _s.pack("<I", 0xFEEF04BD)
+                data += _s.pack("<I", struc)
+                data += _s.pack("<II", ms, ls)
+                data += b"\x00" * 32
+            return data
+        # garbage block (bad struc) followed by real DLSS 310.5.2.0
+        blob = make([(0x12345678, 0xB6EF0000, 0xB6EF1250),
+                     (0x00010000, (310 << 16) | 5, (2 << 16) | 0)])
+        f = Path(_tf.mktemp(suffix=".dll"))
+        f.write_bytes(blob)
+        self.assertEqual(pcc.pe_version(f), "310.5.2.0")
+        # garbage-only must return None, not the 46863 nonsense
+        blob2 = make([(0x99999999, 0xB6EF0000, 0xB6EF1250)])
+        f2 = Path(_tf.mktemp(suffix=".dll"))
+        f2.write_bytes(blob2)
+        self.assertIsNone(pcc.pe_version(f2))
+
+    def test_dll_library_dedupes_same_version(self):
+        """Two dirs holding the same real version (e.g. a garbage-named one from
+        the old parser plus a correct one) collapse to a single entry."""
+        import struct as _s
+        def mk(a, b, c, d):
+            data = b"\x00" * 64
+            data += _s.pack("<I", 0xFEEF04BD) + _s.pack("<I", 0x00010000)
+            data += _s.pack("<II", (a << 16) | b, (c << 16) | d) + b"\x00" * 32
+            return b"MZ" + data
+        lib = Path(self.tmp.name) / "dlls2"
+        pcc.DLL_LIBRARY = lib
+        fg = lib / "fg"
+        blob = mk(310, 7, 0, 0)
+        for name in ("46863.0.46863.4696", "310.7.0.0"):
+            d = fg / name
+            d.mkdir(parents=True)
+            (d / "nvngx_dlssg.dll").write_bytes(blob)
+        entries = [e for e in pcc.dll_library() if e["kind"] == "fg"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["version"], "310.7.0.0")
+        self.assertTrue((fg / "310.7.0.0").exists())
+        self.assertFalse((fg / "46863.0.46863.4696").exists())
+
+    def test_scan_skips_development_dlls(self):
+        """Debug DLSS copies in Development/ are not runtime DLLs; skip them."""
+        import struct as _s
+        def mk(a, b, c, d):
+            data = b"MZ" + b"\x00" * 64 + _s.pack("<I", 0xFEEF04BD)
+            data += _s.pack("<I", 0x00010000)
+            data += _s.pack("<II", (a << 16) | b, (c << 16) | d) + b"\x00" * 32
+            return data
+        game = Path(self.tmp.name) / "game"
+        rel = game / "Plugins" / "Win64"
+        rel.mkdir(parents=True)
+        (rel / "nvngx_dlssg.dll").write_bytes(mk(310, 7, 0, 0))
+        dev = rel / "Development"
+        dev.mkdir()
+        (dev / "nvngx_dlssg.dll").write_bytes(mk(310, 1, 0, 0))
+        found = pcc.scan_game_dlss(game)
+        self.assertEqual(len(found), 1)
+        self.assertNotIn("Development", found[0]["path"])
 
 
 if __name__ == "__main__":

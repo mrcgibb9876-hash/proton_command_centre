@@ -8,6 +8,7 @@ for Steam on Linux. Stdlib only. Run: python3 pcc.py  ->  http://localhost:8686
 import hashlib
 import json
 import os
+import tempfile
 import re
 import shutil
 import struct
@@ -24,7 +25,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.4.0"
+VERSION = "1.9.1"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -32,6 +33,7 @@ DLL_LIBRARY = DATA_DIR / "dlls"        # dlls/<kind>/<version>/<name>.dll
 BACKUP_DIR = DATA_DIR / "backups"      # backups/<appid>/<relpath>.pccbak
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DLL_LIBRARY.mkdir(parents=True, exist_ok=True)
+_DEDUPE_ON_IMPORT = True  # dedupe runs lazily via dll_library()
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
 DLSS_KINDS = {
@@ -660,6 +662,87 @@ def vdf_unescape(s):
     return s.replace('\\"', '"').replace("\\\\", "\\")
 
 
+
+def set_game_config(root, appid, launch_value=None, compat_tool=None,
+                    close_steam=False):
+    """Single-save: write launch options AND compat tool together, closing
+    Steam once for both rather than twice."""
+    result = {}
+    if close_steam and steam_running():
+        shutdown_steam()
+        close_steam = False  # already down; downstream calls shouldn't retry
+    if launch_value is not None:
+        result["launch"] = set_launch_options(root, appid, launch_value,
+                                               close_steam=False)
+    if compat_tool is not None:
+        result["compat"] = set_compat_tool(root, appid, compat_tool,
+                                           close_steam=False)
+    return {"saved": True, **result}
+
+
+SHADER_ENV_VARS = {
+    # Only vars that still do something on modern stock Proton (DXVK >= 2.7) are
+    # included. DXVK_ASYNC and DXVK_STATE_CACHE were both removed upstream once
+    # Vulkan GPL (graphics_pipeline_library) made them obsolete, so they are
+    # deliberately omitted — setting them achieves nothing. What remains is the
+    # NVIDIA driver-level shader disk cache, which is independent of DXVK and
+    # genuinely persists compiled shaders across runs.
+    "__GL_SHADER_DISK_CACHE": "1",
+    "__GL_SHADER_DISK_CACHE_PATH": str(Path.home() / ".cache" / "nvidia-shaders"),
+    "__GL_SHADER_DISK_CACHE_SKIP_CLEANUP": "1",   # keep cache instead of purging on size
+    "__GL_SHADER_DISK_CACHE_SIZE": "10737418240",  # 10 GiB ceiling
+}
+
+
+def read_environment():
+    path = Path("/etc/environment")
+    try:
+        return path.read_text()
+    except OSError:
+        return ""
+
+
+def environment_shader_status():
+    txt = read_environment()
+    present = {}
+    for k in SHADER_ENV_VARS:
+        m = re.search(rf"^{re.escape(k)}=(.*)$", txt, re.M)
+        present[k] = m.group(1).strip().strip('"') if m else None
+    return {"enabled": all(present[k] is not None for k in SHADER_ENV_VARS),
+            "vars": present}
+
+
+def set_environment_shaders(enable):
+    """Add or remove the shader-cache env vars in /etc/environment via pkexec.
+    Preserves every other line; only touches our keys."""
+    Path(SHADER_ENV_VARS["__GL_SHADER_DISK_CACHE_PATH"]).mkdir(
+        parents=True, exist_ok=True)
+    txt = read_environment()
+    lines = [l for l in txt.splitlines()
+             if not any(l.strip().startswith(f"{k}=") for k in SHADER_ENV_VARS)]
+    if enable:
+        lines.append("# Proton Command Center - shader cache")
+        for k, v in SHADER_ENV_VARS.items():
+            lines.append(f'{k}="{v}"' if " " in v or "/" in v else f"{k}={v}")
+    else:
+        lines = [l for l in lines
+                 if l.strip() != "# Proton Command Center - shader cache"]
+    new = "\n".join(lines).rstrip() + "\n"
+
+    # write via a temp file + pkexec cp (root-owned target)
+    tmp = Path(tempfile.gettempdir()) / f"pcc-environment-{os.getpid()}"
+    tmp.write_text(new)
+    try:
+        r = subprocess.run(["pkexec", "cp", str(tmp), "/etc/environment"],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip() or
+                               "pkexec was cancelled or failed")
+    finally:
+        tmp.unlink(missing_ok=True)
+    return {"enabled": enable, "note": "Log out and back in for changes to apply."}
+
+
 def set_launch_options(root, appid, value, close_steam=False):
     if steam_running():
         if close_steam:
@@ -702,17 +785,43 @@ def set_launch_options(root, appid, value, close_steam=False):
 # --------------------------------------------------------------------------
 
 def pe_version(path):
-    """Read file version from VS_FIXEDFILEINFO without dependencies."""
+    """Read file version from VS_FIXEDFILEINFO without dependencies.
+
+    The 0xFEEF04BD signature can appear coincidentally in a DLL's data before
+    the real version resource, yielding garbage like '46863.0.46863.4696'. So
+    we scan ALL occurrences and accept only a block whose dwStrucVersion is a
+    sane value and whose resulting version looks like a real DLSS version
+    (major in a plausible range), preferring the highest valid one."""
     try:
         blob = Path(path).read_bytes()
     except OSError:
         return None
     sig = struct.pack("<I", 0xFEEF04BD)
-    idx = blob.find(sig)
-    if idx < 0 or idx + 16 > len(blob):
+    best = None
+    start = 0
+    while True:
+        idx = blob.find(sig, start)
+        if idx < 0:
+            break
+        start = idx + 4
+        if idx + 16 > len(blob):
+            continue
+        # dwStrucVersion (right after signature) is normally 0x00010000
+        struc = struct.unpack_from("<I", blob, idx + 4)[0]
+        if struc not in (0x00010000, 0x00000000, 0x00010001):
+            continue
+        ms, ls = struct.unpack_from("<II", blob, idx + 8)
+        a, b, c, d = ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF
+        # DLSS versions: major is small (1,2,3) or the DLSS4 scheme (310+),
+        # never five digits. Reject implausible parses.
+        if a > 999 or a == 0:
+            continue
+        cand = (a, b, c, d)
+        if best is None or cand > best:
+            best = cand
+    if best is None:
         return None
-    ms, ls = struct.unpack_from("<II", blob, idx + 8)
-    return f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}.{ls & 0xFFFF}"
+    return f"{best[0]}.{best[1]}.{best[2]}.{best[3]}"
 
 
 def scan_game_dlss(install_path):
@@ -720,19 +829,25 @@ def scan_game_dlss(install_path):
     base = Path(install_path)
     if not base.is_dir():
         return found
+    # Some games ship a debug copy of the DLSS DLLs in a Development/ or Debug/
+    # subfolder. Those are not loaded at runtime, so listing them just creates a
+    # confusing duplicate entry. Skip them.
+    SKIP_DIRS = {"development", "debug", "profile", "profiling"}
     for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        dirnames[:] = [d for d in dirnames
+                       if not d.startswith(".") and d.lower() not in SKIP_DIRS]
         for fn in filenames:
             if fn.lower() in DLSS_KINDS:
                 p = Path(dirpath) / fn
                 meta = DLSS_KINDS[fn.lower()]
+                ver = pe_version(p)
                 found.append({
                     "path": str(p),
                     "name": fn,
                     "kind": meta["kind"],
                     "label": meta["label"],
-                    "version": pe_version(p),
-                    "friendly": friendly_dlss(pe_version(p)),
+                    "version": ver,
+                    "friendly": friendly_dlss(ver),
                     "size": p.stat().st_size,
                     "backed_up": _backup_path(p).exists(),
                 })
@@ -745,18 +860,61 @@ def _backup_path(dll_path):
     return BACKUP_DIR / f"{h}.pccbak"
 
 
+
+def dedupe_dll_library():
+    """One-time housekeeping: if two directories under a kind hold the same real
+    DLL version (e.g. a garbage-named dir from the old parser plus a correctly
+    named one), keep the correctly-named one and remove the rest. Safe to run on
+    every startup."""
+    if not DLL_LIBRARY.is_dir():
+        return
+    for kind_dir in DLL_LIBRARY.iterdir():
+        if not kind_dir.is_dir():
+            continue
+        by_version = {}
+        for vdir in kind_dir.iterdir():
+            if not vdir.is_dir():
+                continue
+            dll = next(vdir.glob("*.dll"), None)
+            if not dll:
+                shutil.rmtree(vdir, ignore_errors=True)
+                continue
+            real = pe_version(dll) or vdir.name
+            by_version.setdefault(real, []).append(vdir)
+        for real, dirs in by_version.items():
+            if len(dirs) < 2:
+                continue
+            # keep the dir whose name matches the real version, else the first
+            keep = next((d for d in dirs if d.name == real), dirs[0])
+            for d in dirs:
+                if d != keep:
+                    shutil.rmtree(d, ignore_errors=True)
+
+
 def dll_library():
+    dedupe_dll_library()
     out = []
+    seen = set()
     for kind_dir in sorted(DLL_LIBRARY.iterdir()) if DLL_LIBRARY.is_dir() else []:
         if not kind_dir.is_dir():
             continue
         for ver_dir in sorted(kind_dir.iterdir()):
             dll = next(ver_dir.glob("*.dll"), None)
             if dll:
+                # Prefer the version read from the DLL itself; the directory
+                # name may be stale garbage from the old parser. Fall back to
+                # the dir name only if the DLL can't be read.
+                real = pe_version(dll) or ver_dir.name
+                # Dedupe by (kind, real version): an old garbage-named dir and a
+                # freshly-named dir can hold the same actual DLL version.
+                key = (kind_dir.name, real)
+                if key in seen:
+                    continue
+                seen.add(key)
                 out.append({
                     "kind": kind_dir.name,
-                    "version": ver_dir.name,
-                    "friendly": friendly_dlss(ver_dir.name),
+                    "version": real,
+                    "friendly": friendly_dlss(real),
                     "path": str(dll),
                     "name": dll.name,
                 })
@@ -771,9 +929,23 @@ def import_dll(src_path):
         raise RuntimeError(f"Not a recognised DLSS DLL name: {p.name}")
     ver = pe_version(p) or "unknown"
     kind = DLSS_KINDS[p.name.lower()]["kind"]
-    dest = DLL_LIBRARY / kind / ver
+    kind_root = DLL_LIBRARY / kind
+    dest = kind_root / ver
     dest.mkdir(parents=True, exist_ok=True)
+    # clear any stale file already in this version dir, then copy the new one
+    for old in dest.glob("*.dll"):
+        old.unlink()
     shutil.copy2(p, dest / p.name.lower())
+    # Remove any OTHER directory for this kind that actually holds the SAME
+    # version (e.g. a garbage-named dir from the old parser). Different real
+    # versions are kept — downgrading stays possible.
+    if kind_root.is_dir():
+        for vdir in kind_root.iterdir():
+            if not vdir.is_dir() or vdir.name == ver:
+                continue
+            other = next(vdir.glob("*.dll"), None)
+            if other and (pe_version(other) or vdir.name) == ver:
+                shutil.rmtree(vdir, ignore_errors=True)
     return {"kind": kind, "version": ver}
 
 
@@ -913,6 +1085,54 @@ def _try_release_zip(repo, fname, task_id):
     return None
 
 
+
+DLSS_MANIFEST_URL = ("https://raw.githubusercontent.com/beeradmoore/"
+                     "dlss-swapper-manifest-builder/refs/heads/main/manifest.json")
+
+# Section names inside the manifest, verified from DLSS Swapper's wiki/source:
+#   dlss = Super Resolution, dlss_g = Frame Generation, dlss_d = Ray Reconstruction
+DLSS_MANIFEST_SECTION = {"sr": "dlss", "fg": "dlss_g", "rr": "dlss_d"}
+
+
+def _manifest_latest(kind, task_id):
+    """Fetch DLSS Swapper's manifest (the same one that tool refreshes every
+    launch) and return (version, dll_bytes) for the newest STABLE entry of the
+    requested kind. Covers SR/FG/RR — this is how the latest DLSS 4.x DLLs are
+    found. Returns None on any failure so callers fall back to NVIDIA repos."""
+    import zipfile, io
+    section = DLSS_MANIFEST_SECTION.get(kind)
+    if not section:
+        return None
+    try:
+        manifest = _gh_json(DLSS_MANIFEST_URL)
+    except Exception:
+        return None
+    entries = manifest.get(section) if isinstance(manifest, dict) else None
+    if not entries:
+        return None
+    # entries carry a version_number (packed 64-bit) or a dotted version string
+    def _key(e):
+        vn = e.get("version_number")
+        if isinstance(vn, int):
+            return vn
+        return version_tuple(e.get("version", "0"))
+    best = max(entries, key=_key)
+    dl = best.get("download_url")
+    if not dl:
+        return None
+    TASKS[task_id]["detail"] = f"Manifest has {best.get('version')}, downloading"
+    data = _gh_bytes(dl, task_id)
+    fname = KIND_TO_NAME.get(kind)
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            members = [m for m in z.namelist() if m.lower().endswith(fname)]
+            if members:
+                return best.get("version"), z.read(members[0])
+    except zipfile.BadZipFile:
+        pass
+    return None
+
+
 def download_dlss(task_id, kind):
     """Fetch the requested DLL kind from NVIDIA's official repos. Strategy per
     repo: tree search -> directory probe (tree may be truncated) -> release
@@ -923,6 +1143,28 @@ def download_dlss(task_id, kind):
     TASKS[task_id] = {"status": "running", "progress": 0,
                       "detail": f"Looking for {label} DLL"}
     errors = []
+
+    # PRIMARY: DLSS Swapper's manifest — refreshed constantly, carries the
+    # newest SR/FG/RR versions (this is the fix for "not fetching the latest").
+    try:
+        TASKS[task_id]["detail"] = "Checking DLSS Swapper manifest"
+        got = _manifest_latest(kind, task_id)
+        if got:
+            version, data = got
+            tmp_final = DATA_DIR / dll_name
+            try:
+                tmp_final.write_bytes(data)
+                if data[:2] == b"MZ" and pe_version(tmp_final):
+                    info = import_dll(tmp_final)
+                    fr = friendly_dlss(info["version"])
+                    TASKS[task_id] = {"status": "done", "progress": 100,
+                                      "detail": f"Added {fr['gen']} {label} "
+                                                f"{fr['short']}"}
+                    return
+            finally:
+                tmp_final.unlink(missing_ok=True)
+    except Exception as e:
+        errors.append(f"manifest: {e}")
     for repo, fname in DLL_SOURCES.get(kind, []):
         try:
             TASKS[task_id]["detail"] = f"Searching {repo}"
@@ -967,9 +1209,9 @@ def download_dlss(task_id, kind):
             errors.append(f"{repo}: {e}")
     TASKS[task_id] = {
         "status": "error", "progress": 0,
-        "detail": ("Couldn't fetch from NVIDIA's repos ("
-                   + "; ".join(errors[:2]) + "). You can still download the "
-                   "DLL manually (e.g. TechPowerUp) and import it below.")}
+        "detail": ("Couldn't fetch the DLL ("
+                   + "; ".join(errors[:2]) + "). You can still download it "
+                   "manually (e.g. TechPowerUp) and import it below.")}
 
 
 def download_latest_sr(task_id):  # kept for compatibility
@@ -1274,6 +1516,18 @@ def deck_verified(appid):
     state.setdefault("deckverified", {})[str(appid)] = {"ts": time.time(), "data": out}
     save_state(state)
     return out
+
+
+def protondb_cached(appid):
+    """Return a previously-fetched ProtonDB rating from state without ever
+    hitting the network. Used to repopulate the badge when the app reopens, so
+    a rating the user already checked stays visible. Returns None if never
+    checked."""
+    state = load_state()
+    cache = state.get("protondb", {}).get(str(appid))
+    if cache:
+        return cache.get("data")
+    return None
 
 
 def protondb_summary(appid):
@@ -1884,25 +2138,46 @@ def precompile_all(task_id, root, device_index=0, skip_compiled=True):
                           "detail": "Everything already compiled — nothing to do"}
         return
     threads = str(max(1, (os.cpu_count() or 4) - 2))
+    total_files = sum(len(f) for _, f in todo)
+    done_files = 0
+    skipped = []
     for gi, (g, foz_files) in enumerate(todo):
         rcache = find_replayer_cache(root, g["appid"])
+        game_ok = True
         for foz in foz_files:
-            TASKS[task_id]["detail"] = f'{g["name"]} — {Path(foz).name}'
+            done_files += 1
+            TASKS[task_id]["detail"] = (f'{g["name"]} — {Path(foz).name} '
+                                        f'({done_files}/{total_files})')
+            TASKS[task_id]["progress"] = int(done_files / total_files * 100)
             cmd = [exe, "--device-index", str(device_index),
                    "--num-threads", threads]
             if rcache:
                 cmd += ["--replayer-cache", rcache]
             cmd.append(foz)
             try:
-                subprocess.run(cmd, capture_output=True, timeout=3600)
-            except Exception as e:
-                TASKS[task_id] = {"status": "error", "progress": 0,
-                                  "detail": f'{g["name"]}: {e}'}
-                return
-        mark_compiled(root, g["appid"])
-        TASKS[task_id]["progress"] = int((gi + 1) / len(todo) * 100)
-    TASKS[task_id] = {"status": "done", "progress": 100,
-                      "detail": f"Compiled {len(todo)} game(s)"}
+                # Per-file cap of 10 min. A stuck/huge foz no longer freezes the
+                # whole batch — it's skipped and the run continues.
+                subprocess.run(cmd, capture_output=True, timeout=600)
+            except subprocess.TimeoutExpired:
+                game_ok = False
+                skipped.append(g["name"])
+                TASKS[task_id]["detail"] = (f'{g["name"]} took too long — '
+                                            f'skipped, continuing')
+                continue
+            except Exception:
+                # a single bad file shouldn't kill the whole library run
+                game_ok = False
+                skipped.append(g["name"])
+                continue
+        if game_ok:
+            mark_compiled(root, g["appid"])
+    msg = f"Compiled {len(todo) - len(set(skipped))} game(s)"
+    if skipped:
+        uniq = list(dict.fromkeys(skipped))
+        msg += f"; skipped {len(uniq)} (took too long): {', '.join(uniq[:3])}"
+        if len(uniq) > 3:
+            msg += f" +{len(uniq) - 3} more"
+    TASKS[task_id] = {"status": "done", "progress": 100, "detail": msg}
 
 
 
@@ -1971,6 +2246,231 @@ def set_steam_shader_setting(root, file, path, value, close_steam=False):
     tmp.write_text(vdf_dump(data))
     tmp.replace(cfg)
     return {"saved": True, "path": path, "value": str(value), "backup": str(bak)}
+
+
+
+# --------------------------------------------------------------------------
+# Hardware detection + MangoHud configuration
+# --------------------------------------------------------------------------
+MANGOHUD_DIR = Path(os.environ.get("XDG_CONFIG_HOME",
+                                   str(Path.home() / ".config"))) / "MangoHud"
+
+FONT_CANDIDATES = [
+    "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
+    "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
+    "/usr/share/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf",
+    "/usr/share/fonts/TTF/FiraCode-Regular.ttf",
+    "/usr/share/fonts/TTF/Hack-Regular.ttf",
+    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+]
+
+
+def find_font():
+    for f in FONT_CANDIDATES:
+        if Path(f).is_file():
+            return f
+    for root_dir in ("/usr/share/fonts",):
+        base = Path(root_dir)
+        if base.is_dir():
+            for p in base.rglob("*Mono*.ttf"):
+                return str(p)
+    return None
+
+
+def cpu_name():
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.lower().startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return "Unknown CPU"
+
+
+def _nvidia_gpus():
+    out = []
+    try:
+        r = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=name,pci.bus_id,memory.total,driver_version",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=6)
+        if r.returncode != 0:
+            return out
+        for line in r.stdout.strip().splitlines():
+            parts = [x.strip() for x in line.split(",")]
+            if len(parts) < 2:
+                continue
+            name, bus = parts[0], parts[1]
+            # 00000000:01:00.0 -> 0000:01:00.0 (MangoHud pci_dev format)
+            m = re.search(r"([0-9a-fA-F]{4}):([0-9a-fA-F]{2}):"
+                          r"([0-9a-fA-F]{2})\.(\d)", bus)
+            pci = f"{m.group(1)}:{m.group(2)}:{m.group(3)}.{m.group(4)}".lower() \
+                if m else None
+            out.append({"name": name, "vendor": "NVIDIA", "pci_dev": pci,
+                        "vram_mb": int(parts[2].split()[0]) if len(parts) > 2
+                                   and parts[2].split()[0].isdigit() else None,
+                        "driver": parts[3] if len(parts) > 3 else None,
+                        "discrete": True})
+    except Exception:
+        pass
+    return out
+
+
+def _drm_gpus():
+    """AMD/Intel GPUs via sysfs, so iGPUs are named too."""
+    out = []
+    base = Path("/sys/class/drm")
+    if not base.is_dir():
+        return out
+    seen = set()
+    for card in sorted(base.glob("card[0-9]")):
+        dev = card / "device"
+        try:
+            vendor = (dev / "vendor").read_text().strip()
+            pci = os.path.basename(os.path.realpath(dev))
+        except OSError:
+            continue
+        if pci in seen:
+            continue
+        seen.add(pci)
+        vmap = {"0x1002": "AMD", "0x8086": "Intel", "0x10de": "NVIDIA"}
+        vname = vmap.get(vendor.lower())
+        if not vname or vname == "NVIDIA":     # NVIDIA handled by nvidia-smi
+            continue
+        label = None
+        try:
+            label = (dev / "product_name").read_text().strip()
+        except OSError:
+            pass
+        out.append({"name": label or f"{vname} GPU ({pci})", "vendor": vname,
+                    "pci_dev": pci, "vram_mb": None, "driver": None,
+                    "discrete": False})
+    return out
+
+
+def detect_hardware():
+    gpus = _nvidia_gpus() + _drm_gpus()
+    return {
+        "cpu": cpu_name(),
+        "cores": os.cpu_count(),
+        "gpus": gpus,
+        "hybrid": len(gpus) > 1,
+        "font": find_font(),
+        "mangohud": shutil.which("mangohud") is not None,
+        "config_path": str(MANGOHUD_DIR / "MangoHud.conf"),
+        "config_exists": (MANGOHUD_DIR / "MangoHud.conf").is_file(),
+    }
+
+
+# MangoHud 0.8.2 with legacy_layout=false draws a column per listed param.
+# The look in the reference screenshot: horizontal single line, orange section
+# headings, white values, grey unit labels, separators between GPU|CPU|FPS,
+# dark rounded background, frametime graph beneath.
+MANGOHUD_STYLE = {
+    "horizontal": True,             # single-line layout like the reference
+    "legacy_layout": False,
+    "table_columns": 14,
+    "background_alpha": 0.6,
+    "round_corners": 8,
+    "font_size": 22,
+    "font_size_text": 22,
+    "cellpadding_y": -0.03,
+    # colours (hex, no #): orange headings, white values, grey dividers
+    "gpu_color": "F09000",          # orange - matches the RTX label
+    "cpu_color": "F09000",
+    "vram_color": "F09000",
+    "ram_color": "F09000",
+    "engine_color": "F09000",
+    "io_color": "FFFFFF",
+    "frametime_color": "FFFFFF",
+    "background_color": "0B0E11",
+    "text_color": "FFFFFF",
+    "media_player_color": "FFFFFF",
+    "network_color": "FFFFFF",
+    "separator_color": "3A444E",
+    "battery_color": "FFFFFF",
+    "wine_color": "F09000",
+}
+
+MANGOHUD_PRESETS = {
+    # GPU name + load% + temp + VRAM used | CPU name + load% + temp | FPS + graph
+    "reference": ["gpu_name", "gpu_stats", "gpu_load_change", "gpu_temp",
+                  "vram", "cpu_name", "cpu_stats", "cpu_load_change",
+                  "cpu_temp", "fps", "frame_timing=1"],
+    "minimal": ["fps", "frame_timing=1", "gpu_stats", "cpu_stats"],
+    "standard": ["fps", "fps_color_change", "frame_timing=1", "gpu_stats",
+                 "gpu_temp", "gpu_load_change", "vram", "cpu_stats",
+                 "cpu_temp", "cpu_load_change", "ram"],
+    "benchmark": ["fps", "fps_color_change", "frame_timing=1", "histogram",
+                  "gpu_stats", "gpu_temp", "gpu_power", "gpu_load_change",
+                  "vram", "cpu_stats", "cpu_temp", "cpu_power",
+                  "cpu_load_change", "ram", "swap", "io_read", "io_write",
+                  "vulkan_driver", "engine_version", "resolution",
+                  "benchmark_percentiles=AVG,1,0.1"],
+    "stutter": ["fps", "frame_timing=1", "histogram", "frametime",
+                "gpu_stats", "gpu_load_change", "cpu_stats",
+                "cpu_load_change", "throttling_status", "present_mode"],
+}
+
+
+def mangohud_config(preset="reference", hw=None, pin_gpu=None,
+                    log_dir=None, toggle_key="Shift_R+F12"):
+    hw = hw or detect_hardware()
+    lines = [
+        "### Generated by Proton Command Center",
+        f"### CPU: {hw['cpu']}",
+    ]
+    for g in hw["gpus"]:
+        vram = f", {g['vram_mb']} MB" if g.get("vram_mb") else ""
+        lines.append(f"### GPU: {g['name']} ({g['vendor']}{vram})")
+    lines.append("")
+
+    # layout + style block (order-independent, so grouped for readability)
+    if MANGOHUD_STYLE.get("horizontal"):
+        lines.append("horizontal")
+    lines.append("legacy_layout=false")
+    for k, v in MANGOHUD_STYLE.items():
+        if k in ("horizontal", "legacy_layout"):
+            continue
+        if isinstance(v, bool):
+            if v:
+                lines.append(k)
+        else:
+            lines.append(f"{k}={v}")
+    if hw.get("font"):
+        lines.append(f"font_file={hw['font']}")
+    lines.append("text_outline")
+
+    if hw["hybrid"]:
+        target = pin_gpu or next((g["pci_dev"] for g in hw["gpus"]
+                                  if g["discrete"] and g["pci_dev"]), None)
+        if target:
+            lines += ["", "### hybrid GPU: pin stats to the discrete card",
+                      f"pci_dev={target}"]
+
+    lines += [""] + MANGOHUD_PRESETS.get(preset, MANGOHUD_PRESETS["reference"])
+    lines += ["", f"toggle_hud={toggle_key}", "toggle_logging=Shift_L+F2"]
+    if log_dir:
+        lines += [f"output_folder={log_dir}", "log_duration=300",
+                  "autostart_log=0", "benchmark_percentiles=AVG,1,0.1"]
+    return "\n".join(lines) + "\n"
+
+
+def apply_mangohud_config(preset="reference", pin_gpu=None, log_dir=None):
+    MANGOHUD_DIR.mkdir(parents=True, exist_ok=True)
+    dest = MANGOHUD_DIR / "MangoHud.conf"
+    backup = None
+    if dest.is_file():
+        backup = dest.with_suffix(f".conf.pcc-{int(time.time())}.bak")
+        shutil.copy2(dest, backup)
+    text = mangohud_config(preset, pin_gpu=pin_gpu, log_dir=log_dir)
+    tmp = dest.with_suffix(".conf.pcc-tmp")
+    tmp.write_text(text)
+    tmp.replace(dest)
+    return {"written": str(dest), "backup": str(backup) if backup else None,
+            "preset": preset}
 
 
 # --------------------------------------------------------------------------
@@ -2061,6 +2561,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"games": owned_games(root)})
             elif self.path == "/api/steam/shader_settings":
                 self._json(steam_shader_settings(root))
+            elif self.path == "/api/hardware":
+                self._json(detect_hardware())
+            elif self.path == "/api/env/shaders":
+                self._json(environment_shader_status())
+            elif m := re.match(r"^/api/mangohud(?:\?(.*))?$", self.path):
+                qs = urllib.parse.parse_qs(m.group(1) or "")
+                preset = (qs.get("preset") or ["standard"])[0]
+                hw = detect_hardware()
+                self._json({"hardware": hw, "preset": preset,
+                            "preview": mangohud_config(preset, hw)})
             elif self.path == "/api/compat_tools":
                 self._json({"tools": list_compat_tools(root)})
             elif m := re.match(r"^/api/game/(\d+)/compat_tool$", self.path):
@@ -2068,6 +2578,13 @@ class Handler(BaseHTTPRequestHandler):
             elif m := re.match(r"^/api/game/(\d+)/cache$", self.path):
                 self._json({"caches": cache_info(root, m.group(1)),
                             "status": compiled_status(root, m.group(1))})
+            elif m := re.match(r"^/api/game/(\d+)/protondb(?:\?(.*))?$", self.path):
+                qs = urllib.parse.parse_qs(m.group(2) or "")
+                if qs.get("cached"):
+                    self._json(protondb_cached(m.group(1)) or {"tier": None,
+                                                               "cached": True})
+                else:
+                    self._json(protondb_summary(m.group(1)) or {"tier": None})
             elif m := re.match(r"^/api/game/(\d+)/autotune$", self.path):
                 self._json(auto_tune(root, m.group(1)))
             elif m := re.match(r"^/api/game/(\d+)/benchmark$", self.path):
@@ -2121,9 +2638,17 @@ class Handler(BaseHTTPRequestHandler):
         root = steam_root()
         try:
             body = self._body()
-            if m := re.match(r"^/api/game/(\d+)/launch_options$", self.path):
+            if m := re.match(r"^/api/game/(\d+)/save$", self.path):
+                self._json(set_game_config(
+                    root, m.group(1),
+                    launch_value=body.get("launch_options"),
+                    compat_tool=body.get("compat_tool"),
+                    close_steam=bool(body.get("close_steam"))))
+            elif m := re.match(r"^/api/game/(\d+)/launch_options$", self.path):
                 self._json(set_launch_options(root, m.group(1), body.get("value", ""),
                                               close_steam=bool(body.get("close_steam"))))
+            elif self.path == "/api/env/shaders":
+                self._json(set_environment_shaders(bool(body.get("enable"))))
             elif self.path == "/api/settings":
                 cfg = load_config()
                 if "sgdb_api_key" in body:
@@ -2152,6 +2677,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(set_steam_shader_setting(
                     root, body["file"], body["path"], body["value"],
                     close_steam=bool(body.get("close_steam"))))
+            elif self.path == "/api/mangohud/apply":
+                self._json(apply_mangohud_config(
+                    body.get("preset", "standard"),
+                    pin_gpu=body.get("pin_gpu"),
+                    log_dir=str(BENCH_DIR) if body.get("enable_logging") else None))
             elif self.path == "/api/steam/launch":
                 self._json({"launched": launch_steam()})
             elif self.path == "/api/dlss/swap":
