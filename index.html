@@ -448,7 +448,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 
 <script>
 "use strict";
-const FRONTEND_VERSION="1.9.4";
+const FRONTEND_VERSION="1.9.5";
 const $=s=>document.querySelector(s);
 const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
 const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
@@ -470,6 +470,7 @@ const TOGGLES=[
  {id:"gameperf",label:"game-performance",hint:"CachyOS wrapper: performance power profile + screensaver inhibit for the game",wrap:"game-performance"},
  {id:"steamdeckon",label:"Steam Deck spoof (=1)",hint:"SteamDeck=1 — spoofs Deck mode; helps some anti-cheat (ACE) accept Linux",env:"SteamDeck=1"},
  {id:"steamdeckoff",label:"Force Steam Deck off (=0)",hint:"SteamDeck=0 — explicitly disables Deck mode when something else enabled it",env:"SteamDeck=0"},
+ {id:"nvapireflex",label:"DLSS + Reflex",hint:"PROTON_ENABLE_NVAPI=1 (DLSS) + DXVK_NVAPI_VKREFLEX=1 (Vulkan Reflex low-latency layer). Reflex only kicks in on games that implement VK_NV_low_latency2 — helps latency/frame pacing there, harmless elsewhere.",env:"PROTON_ENABLE_NVAPI=1 DXVK_NVAPI_VKREFLEX=1"},
  {id:"gamescope",label:"Gamescope (NVIDIA)",hint:"Wraps the game in gamescope at your display's native resolution/refresh with adaptive-sync + --mangoapp overlay. Forces NVAPI on so DLSS works inside gamescope. Can improve frame pacing by isolating the game from the desktop compositor. NOTE: overrides all other options above except the Proton version.",gamescope:true},
  {id:"gshdr",label:"↳ Gamescope HDR",hint:"Adds --hdr-enabled + DXVK_HDR=1 to the gamescope command. EXPERIMENTAL on NVIDIA: works on many DX11 titles but can black-screen or hang some DX12 games. Only has an effect when Gamescope is on. Turn off if a game shows no image.",gshdr:true},
 ];
