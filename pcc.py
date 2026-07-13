@@ -25,7 +25,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.9.1"
+VERSION = "1.9.4"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -2473,6 +2473,215 @@ def apply_mangohud_config(preset="reference", pin_gpu=None, log_dir=None):
             "preset": preset}
 
 
+
+# --------------------------------------------------------------------------
+# Game Mode (CachyOS Handheld / gamescope session)
+# --------------------------------------------------------------------------
+def detect_display_mode():
+    """Best-effort current resolution + refresh rate for auto-filling the
+    gamescope command. On KDE Wayland, kscreen-doctor reports the active mode
+    (marked with '*'). Falls back to /sys/class/drm modes for resolution and a
+    sane 60 Hz default. Returns {'width','height','refresh'} or None."""
+    # 1) kscreen-doctor (KDE Wayland) — has both res AND refresh
+    kd = shutil.which("kscreen-doctor")
+    if kd:
+        try:
+            out = subprocess.run([kd, "-o"], capture_output=True, text=True,
+                                 timeout=5).stdout
+            # active mode looks like:  1:2560x1600@165.00*!  (star = current).
+            # Refresh may carry decimals, so match them and round to int.
+            m = re.search(r"(\d+)x(\d+)@(\d+(?:\.\d+)?)\*", out)
+            if m:
+                return {"width": int(m.group(1)), "height": int(m.group(2)),
+                        "refresh": round(float(m.group(3)))}
+        except Exception:
+            pass
+    # 2) /sys/class/drm current-mode fallback (resolution only, assume 60)
+    try:
+        for status in Path("/sys/class/drm").glob("*/status"):
+            if status.read_text().strip() == "connected":
+                modes = status.parent / "modes"
+                if modes.is_file():
+                    first = modes.read_text().splitlines()
+                    if first:
+                        w, h = first[0].split("x")
+                        return {"width": int(w), "height": int(h),
+                                "refresh": 60}
+    except Exception:
+        pass
+    return None
+
+
+def game_mode_available():
+    """Detect whether a gamescope Game Mode session can be launched. CachyOS
+    Handheld ships steamos-session-select plus a gamescope session file."""
+    switcher = shutil.which("steamos-session-select")
+    session = any(Path(d).is_file() for d in (
+        "/usr/share/wayland-sessions/gamescope-session.desktop",
+        "/usr/share/wayland-sessions/gamescope.desktop",
+    ))
+    return {"available": bool(switcher) and session,
+            "switcher": switcher,
+            "has_session": session}
+
+
+def launch_game_mode():
+    """Switch to the gamescope Game Mode session. NOTE: this ends the desktop
+    session, so it also terminates this backend and the browser tab — it's a
+    one-way switch. Return before the session actually tears down so the API
+    call can respond."""
+    info = game_mode_available()
+    if not info["available"]:
+        raise RuntimeError("Game Mode not available — steamos-session-select "
+                           "or the gamescope session file is missing "
+                           "(install cachyos-handheld / gamescope-session-cachyos).")
+    # steamos-session-select runs as the user and triggers the switch. Fire it
+    # detached so the HTTP response can flush before the desktop goes down.
+    subprocess.Popen(["steamos-session-select", "gamescope"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    return {"switching": True}
+
+
+
+# --------------------------------------------------------------------------
+# Backup / restore — export and re-import PCC's own data (survives reinstalls)
+# --------------------------------------------------------------------------
+def export_backup(dest_dir=None):
+    """Bundle PCC's data (DLL library, backups, state, config/API keys,
+    MangoHud config) into a single .tar.gz the user can keep and re-import
+    after an OS reinstall. Returns the archive path."""
+    import tarfile
+    dest_dir = Path(dest_dir) if dest_dir else (Path.home() / "Downloads"
+               if (Path.home() / "Downloads").is_dir() else Path.home())
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    archive = dest_dir / f"pcc-backup-{stamp}.tar.gz"
+    mango = Path.home() / ".config/MangoHud/MangoHud.conf"
+    with tarfile.open(archive, "w:gz") as tar:
+        # everything under DATA_DIR except the transient art cache
+        for item in DATA_DIR.iterdir():
+            if item.name in ("artcache", "art_cache"):
+                continue
+            tar.add(item, arcname=f"pcc-data/{item.name}")
+        if mango.is_file():
+            tar.add(mango, arcname="mangohud/MangoHud.conf")
+    return {"archive": str(archive), "size": archive.stat().st_size}
+
+
+def restore_backup(archive_path):
+    """Restore a PCC backup archive produced by export_backup. Existing data is
+    overwritten by the archive's contents; anything not in the archive is left
+    alone. MangoHud config is restored to its standard location."""
+    import tarfile
+    src = Path(archive_path).expanduser()
+    if not src.is_file():
+        raise RuntimeError(f"Backup not found: {src}")
+    restored = {"data": 0, "mangohud": False}
+    with tarfile.open(src, "r:gz") as tar:
+        for member in tar.getmembers():
+            name = member.name
+            if name.startswith("pcc-data/"):
+                rel = name[len("pcc-data/"):]
+                if not rel or ".." in rel:
+                    continue
+                target = DATA_DIR / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                fobj = tar.extractfile(member)
+                if fobj:
+                    target.write_bytes(fobj.read())
+                    restored["data"] += 1
+                elif member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+            elif name == "mangohud/MangoHud.conf":
+                mdir = Path.home() / ".config/MangoHud"
+                mdir.mkdir(parents=True, exist_ok=True)
+                fobj = tar.extractfile(member)
+                if fobj:
+                    (mdir / "MangoHud.conf").write_bytes(fobj.read())
+                    restored["mangohud"] = True
+    return {"restored": True, **restored}
+
+
+
+# --------------------------------------------------------------------------
+# Proton compatibility tool management (GE-Proton install / update awareness)
+# --------------------------------------------------------------------------
+GE_PROTON_RELEASES = "https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases"
+COMPAT_INSTALL_DIR = Path.home() / ".local/share/Steam/compatibilitytools.d"
+
+
+def _installed_ge_versions():
+    """Version dirs already present in the user compatibilitytools.d."""
+    out = set()
+    if COMPAT_INSTALL_DIR.is_dir():
+        for d in COMPAT_INSTALL_DIR.iterdir():
+            if d.is_dir():
+                out.add(d.name)
+    return out
+
+
+def list_ge_proton(limit=10):
+    """List recent GE-Proton releases from GitHub with an 'installed' flag.
+    Cached 6h. This is the 'what's available / am I up to date' view."""
+    state = load_state()
+    cache = state.get("ge_releases")
+    now = time.time()
+    if cache and now - cache.get("ts", 0) < 21600:
+        rels = cache["data"]
+    else:
+        try:
+            data = _gh_json(GE_PROTON_RELEASES)
+        except Exception as e:
+            return {"error": str(e), "releases": []}
+        rels = []
+        for r in data[:limit]:
+            asset = next((a for a in r.get("assets", [])
+                          if a["name"].endswith(".tar.gz")), None)
+            if not asset:
+                continue
+            rels.append({"tag": r["tag_name"],
+                         "name": r["name"] or r["tag_name"],
+                         "url": asset["browser_download_url"],
+                         "size": asset.get("size", 0),
+                         "published": r.get("published_at", "")[:10]})
+        state["ge_releases"] = {"ts": now, "data": rels}
+        save_state(state)
+    installed = _installed_ge_versions()
+    for r in rels:
+        # GE tarballs extract to a dir named after the tag (e.g. GE-Proton9-27)
+        r["installed"] = any(r["tag"] in name or name in r["tag"]
+                             for name in installed)
+    newest = rels[0]["tag"] if rels else None
+    up_to_date = bool(newest and any(r["installed"] and r["tag"] == newest
+                                     for r in rels))
+    return {"releases": rels, "newest": newest, "up_to_date": up_to_date,
+            "installed": sorted(installed)}
+
+
+def install_ge_proton(task_id, url, tag):
+    """Download a GE-Proton tarball and extract it into the user
+    compatibilitytools.d. Steam picks it up on next launch."""
+    import tarfile, io
+    TASKS[task_id] = {"status": "running", "progress": 10,
+                      "detail": f"Downloading {tag}"}
+    try:
+        data = _gh_bytes(url, task_id)
+        TASKS[task_id] = {"status": "running", "progress": 80,
+                          "detail": f"Extracting {tag}"}
+        COMPAT_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            # safety: refuse absolute paths or traversal in members
+            for m in tar.getmembers():
+                if m.name.startswith("/") or ".." in m.name.split("/"):
+                    raise RuntimeError(f"unsafe path in archive: {m.name}")
+            tar.extractall(COMPAT_INSTALL_DIR)
+        TASKS[task_id] = {"status": "done", "progress": 100,
+                          "detail": f"Installed {tag} — restart Steam to use it"}
+    except Exception as e:
+        TASKS[task_id] = {"status": "error", "progress": 0,
+                          "detail": f"{tag}: {e}"}
+
+
 # --------------------------------------------------------------------------
 # HTTP server
 # --------------------------------------------------------------------------
@@ -2563,6 +2772,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(steam_shader_settings(root))
             elif self.path == "/api/hardware":
                 self._json(detect_hardware())
+            elif self.path == "/api/game_mode":
+                self._json(game_mode_available())
+            elif self.path == "/api/display_mode":
+                self._json(detect_display_mode() or {})
+            elif self.path == "/api/backup/export":
+                self._json(export_backup())
+            elif self.path == "/api/proton/list":
+                self._json(list_ge_proton())
             elif self.path == "/api/env/shaders":
                 self._json(environment_shader_status())
             elif m := re.match(r"^/api/mangohud(?:\?(.*))?$", self.path):
@@ -2649,6 +2866,16 @@ class Handler(BaseHTTPRequestHandler):
                                               close_steam=bool(body.get("close_steam"))))
             elif self.path == "/api/env/shaders":
                 self._json(set_environment_shaders(bool(body.get("enable"))))
+            elif self.path == "/api/game_mode/launch":
+                self._json(launch_game_mode())
+            elif self.path == "/api/backup/restore":
+                self._json(restore_backup(body["archive"]))
+            elif self.path == "/api/proton/install":
+                tid = str(uuid.uuid4())
+                threading.Thread(target=install_ge_proton,
+                                 args=(tid, body["url"], body["tag"]),
+                                 daemon=True).start()
+                self._json({"task": tid})
             elif self.path == "/api/settings":
                 cfg = load_config()
                 if "sgdb_api_key" in body:

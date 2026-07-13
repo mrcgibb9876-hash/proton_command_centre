@@ -723,6 +723,62 @@ class PCCTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertNotIn("Development", found[0]["path"])
 
+    def test_backup_export_and_restore(self):
+        import tarfile
+        data = Path(self.tmp.name) / "pccdata"
+        data.mkdir()
+        pcc.DATA_DIR = data
+        (data / "state.json").write_text('{"x":1}')
+        (data / "config.json").write_text('{"key":"secret"}')
+        (data / "artcache").mkdir()
+        (data / "artcache" / "j.jpg").write_bytes(b"x" * 100)
+        out = Path(self.tmp.name) / "out"
+        out.mkdir()
+        r = pcc.export_backup(out)
+        with tarfile.open(r["archive"]) as tar:
+            names = tar.getnames()
+        self.assertTrue(any("state.json" in n for n in names))
+        self.assertFalse(any("artcache" in n for n in names))
+        import shutil
+        shutil.rmtree(data)
+        data.mkdir()
+        pcc.restore_backup(r["archive"])
+        self.assertEqual((data / "state.json").read_text(), '{"x":1}')
+
+    def test_ge_proton_list_flags_installed(self):
+        import tempfile as _tf
+        pcc.STATE_FILE = Path(_tf.mktemp())
+        pcc.COMPAT_INSTALL_DIR = Path(self.tmp.name) / "compat"
+        pcc.COMPAT_INSTALL_DIR.mkdir()
+        (pcc.COMPAT_INSTALL_DIR / "GE-Proton9-27").mkdir()
+        mock = [{"tag_name": "GE-Proton9-28", "name": "GE-Proton9-28",
+                 "published_at": "2026-07-01T00:00:00Z",
+                 "assets": [{"name": "GE-Proton9-28.tar.gz",
+                             "browser_download_url": "http://x/28.tar.gz",
+                             "size": 1}]},
+                {"tag_name": "GE-Proton9-27", "name": "GE-Proton9-27",
+                 "published_at": "2026-06-01T00:00:00Z",
+                 "assets": [{"name": "GE-Proton9-27.tar.gz",
+                             "browser_download_url": "http://x/27.tar.gz",
+                             "size": 1}]}]
+        real = pcc._gh_json
+        pcc._gh_json = lambda u: mock
+        try:
+            r = pcc.list_ge_proton()
+        finally:
+            pcc._gh_json = real
+        self.assertEqual(r["newest"], "GE-Proton9-28")
+        self.assertFalse(r["up_to_date"])
+
+    def test_display_mode_parse_from_kscreen(self):
+        """kscreen-doctor active mode (marked *) parses to width/height/refresh."""
+        import re
+        sample = "Modes:  1:2560x1600@165.00*!  2:2560x1600@60.00"
+        m = re.search(r"(\d+)x(\d+)@(\d+(?:\.\d+)?)\*", sample)
+        self.assertIsNotNone(m)
+        self.assertEqual((m.group(1), m.group(2), round(float(m.group(3)))),
+                         ("2560", "1600", 165))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

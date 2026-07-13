@@ -100,6 +100,30 @@ full benchmark overlay.
 play again. Logs are split at your compile time and compared on avg FPS, 1%
 and 0.1% lows, and stutter count, with frametime graphs.
 
+**🎮 Game Mode button** *(CachyOS only)* — appears in the header only on
+CachyOS Handheld / systems with `gamescope-session-cachyos` installed.
+Switches into the gamescope Game Mode session (the Steam Deck UI). Since this
+ends the desktop session, it also closes PCC and the browser tab — return to
+desktop from Steam's Power menu → Switch to Desktop. Hidden entirely on
+systems without the CachyOS handheld session.
+
+## Settings (gear icon)
+
+Beyond the optional API keys above, the Settings panel holds two occasional
+tools kept out of the main UI:
+
+**Backup & restore** — export your DLL library, launch settings, MangoHud
+config, API keys, and ProtonDB ratings to a single timestamped `.tar.gz`
+(saved to Downloads). After a reinstall, paste the archive path and Restore
+pulls it all back. The art cache is excluded (it re-fetches itself).
+
+**Proton versions** — lists recent GE-Proton releases from GitHub with a
+clear "up to date" or "update available" status. Install any version with one
+click; it extracts into `~/.local/share/Steam/compatibilitytools.d/` and
+Steam picks it up on next restart. Already-installed versions are flagged.
+(Proton-CachyOS is installed through pacman — `proton-cachyos` — which is the
+better path on CachyOS since it's system-optimised.)
+
 ## Updating
 
 Re-run `./install.sh` — it copies the new files and restarts in one go. If

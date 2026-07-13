@@ -178,6 +178,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 <header>
   <h1>Proton <span>//</span> Command Center</h1>
   <input id="search" type="text" placeholder="Search your library…" autocomplete="off">
+  <button class="btn" id="gameModeBtn" title="Switch to Game Mode (Steam Deck UI)" hidden>🎮 Game Mode</button>
   <button class="btn" id="hwBtn" title="System &amp; MangoHud">🖥</button>
   <button class="btn" id="settingsBtn" aria-label="Settings" title="Settings">⚙</button>
   <div id="steamState">checking…</div>
@@ -202,6 +203,18 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
   <div class="row" style="margin-top:10px">
     <button class="btn" id="artReset">Clear art cache & re-fetch</button>
   </div>
+
+  <h3 style="font-size:12.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:16px 0 10px">Backup &amp; restore</h3>
+  <p class="note" style="margin:0 0 10px">Save your DLL library, launch settings, MangoHud config, API keys and ProtonDB ratings to one archive — re-import after a reinstall.</p>
+  <div class="row">
+    <button class="btn primary" id="backupExport">Export backup</button>
+    <input type="text" id="restorePath" placeholder="/path/to/pcc-backup-….tar.gz" style="flex:1">
+    <button class="btn" id="backupRestore">Restore</button>
+  </div>
+  <p class="note" id="backupStatus" style="margin-top:8px"></p>
+
+  <h3 style="font-size:12.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:16px 0 10px">Proton versions (GE-Proton)</h3>
+  <div id="protonList"><p class="note">Loading…</p></div>
 </div>
 <div id="globalBar"><i></i></div>
 <div id="verWarn">Frontend/backend version mismatch — restart the service (<span class="mono">systemctl --user restart proton-command-center</span>) and hard-refresh this page (Ctrl+Shift+R).</div>
@@ -435,7 +448,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 
 <script>
 "use strict";
-const FRONTEND_VERSION="1.9.1";
+const FRONTEND_VERSION="1.9.4";
 const $=s=>document.querySelector(s);
 const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
 const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
@@ -457,6 +470,8 @@ const TOGGLES=[
  {id:"gameperf",label:"game-performance",hint:"CachyOS wrapper: performance power profile + screensaver inhibit for the game",wrap:"game-performance"},
  {id:"steamdeckon",label:"Steam Deck spoof (=1)",hint:"SteamDeck=1 — spoofs Deck mode; helps some anti-cheat (ACE) accept Linux",env:"SteamDeck=1"},
  {id:"steamdeckoff",label:"Force Steam Deck off (=0)",hint:"SteamDeck=0 — explicitly disables Deck mode when something else enabled it",env:"SteamDeck=0"},
+ {id:"gamescope",label:"Gamescope (NVIDIA)",hint:"Wraps the game in gamescope at your display's native resolution/refresh with adaptive-sync + --mangoapp overlay. Forces NVAPI on so DLSS works inside gamescope. Can improve frame pacing by isolating the game from the desktop compositor. NOTE: overrides all other options above except the Proton version.",gamescope:true},
+ {id:"gshdr",label:"↳ Gamescope HDR",hint:"Adds --hdr-enabled + DXVK_HDR=1 to the gamescope command. EXPERIMENTAL on NVIDIA: works on many DX11 titles but can black-screen or hang some DX12 games. Only has an effect when Gamescope is on. Turn off if a game shows no image.",gshdr:true},
 ];
 let manualEdit=false;
 
@@ -466,12 +481,36 @@ function renderToggles(){
       <div><b>${t.label}</b><small>${t.hint}</small></div>
       <label class="switch"><input type="checkbox" data-id="${t.id}"><em></em></label>
     </div>`).join("");
+  // HDR sub-toggle is inert until Gamescope is enabled
+  const hdrIn=document.querySelector('#toggles input[data-id="gshdr"]');
+  if(hdrIn){hdrIn.disabled=true;hdrIn.closest(".toggle").style.opacity=".4";}
   $("#toggles").addEventListener("change",async(e)=>{
     // SteamDeck=1 and =0 are opposites — turning one on clears the other
     if(e.target&&e.target.checked){
       const pair={steamdeckon:"steamdeckoff",steamdeckoff:"steamdeckon"};
       const other=pair[e.target.dataset.id];
       if(other){const o=document.querySelector(`#toggles input[data-id="${other}"]`);if(o)o.checked=false;}
+    }
+    // Gamescope is exclusive: turning it on clears + disables every other toggle
+    // EXCEPT its own HDR sub-toggle; turning it off re-enables everything.
+    if(e.target&&e.target.dataset.id==="gamescope"){
+      const gsOn=e.target.checked;
+      document.querySelectorAll("#toggles input").forEach(i=>{
+        if(i.dataset.id==="gamescope")return;
+        if(i.dataset.id==="gshdr"){
+          // HDR sub-toggle: usable only while gamescope is on
+          if(gsOn){i.disabled=false;i.closest(".toggle").style.opacity="";}
+          else{i.checked=false;i.disabled=true;i.closest(".toggle").style.opacity=".4";}
+          return;
+        }
+        if(gsOn){i.checked=false;i.disabled=true;i.closest(".toggle").style.opacity=".4";}
+        else{i.disabled=false;i.closest(".toggle").style.opacity="";}
+      });
+      const dlssBox=$("#dlssControls");
+      if(dlssBox)dlssBox.style.opacity=gsOn?".4":"";
+      if(gsOn && !window.__displayMode){
+        try{window.__displayMode=await api("/api/display_mode");}catch(_){}
+      }
     }
     manualEdit=false;buildString();
     // when the MangoHud toggle is switched ON, ensure our custom config exists
@@ -489,6 +528,23 @@ function renderToggles(){
 function buildString(){
   if(manualEdit)return;
   const on=new Set([...document.querySelectorAll("#toggles input:checked")].map(i=>i.dataset.id));
+  // Gamescope wraps the entire game, so it's mutually exclusive with the other
+  // launch options — when it's on we build ONLY the gamescope command (plus the
+  // Proton compat tool, which is handled separately via the compat selector).
+  if(on.has("gamescope")){
+    const m=window.__displayMode||{width:1920,height:1080,refresh:60};
+    const hdr=on.has("gshdr");
+    // NVAPI must be forced on for DLSS to appear inside gamescope. Both vars:
+    // DXVK_ENABLE_NVAPI actually initialises the NVAPI layer (the documented
+    // fix for "DLSS missing"), PROTON_ENABLE_NVAPI keeps Proton's side on too.
+    let inner="DXVK_ENABLE_NVAPI=1 PROTON_ENABLE_NVAPI=1";
+    if(hdr)inner="DXVK_HDR=1 "+inner;   // game side needs DXVK_HDR for HDR output
+    let flags="-f --adaptive-sync --prefer-vk --mangoapp";
+    if(hdr)flags+=" --hdr-enabled";     // gamescope side enables the HDR pipeline
+    const gs=`gamescope -W ${m.width} -H ${m.height} -r ${m.refresh} ${flags} -- env ${inner} %command%`;
+    $("#launchStr").value=gs;
+    return;
+  }
   const env=[],wraps=[],gameArgs=[];
   for(const t of TOGGLES){
     if(!on.has(t.id))continue;
@@ -1095,6 +1151,25 @@ $("#shaderEnvToggle")?.addEventListener("change",async e=>{
   }
 });
 
+/* ---------- game mode (gamescope / Steam Deck UI) ---------- */
+(async function initGameMode(){
+  try{window.__displayMode=await api("/api/display_mode");}catch(_){}
+  try{
+    const d=await api("/api/game_mode");
+    if(d&&d.available){
+      const btn=$("#gameModeBtn");
+      btn.hidden=false;
+      btn.addEventListener("click",async()=>{
+        if(!confirm("Switch to Game Mode (Steam Deck UI)?\n\nThis closes your desktop session — Proton Command Center and this browser tab will close. Return to desktop from Steam's Power menu → Switch to Desktop."))return;
+        try{
+          await post("/api/game_mode/launch",{});
+          document.body.innerHTML='<div style="display:flex;height:100dvh;align-items:center;justify-content:center;font:600 20px system-ui;color:var(--muted)">Switching to Game Mode…</div>';
+        }catch(e){toast(e.message,true)}
+      });
+    }
+  }catch(e){/* endpoint absent on older backend — leave button hidden */}
+})();
+
 /* ---------- system & mangohud ---------- */
 let hwPreset="reference";
 function hwOpen(v){
@@ -1168,8 +1243,66 @@ $("#settingsBtn").addEventListener("click",async()=>{
     try{const s=await api("/api/settings");
       $("#keyStatus").textContent=s.sgdb_api_key_set?`Key saved (${s.sgdb_api_key_hint})`:"No key set — Steam CDN art only";
     }catch(e){}
+    loadProtonList();
   }
 });
+
+/* ---------- backup / restore ---------- */
+$("#backupExport").addEventListener("click",async()=>{
+  const btn=$("#backupExport");btn.disabled=true;btn.textContent="Exporting…";
+  try{
+    const r=await api("/api/backup/export");
+    const mb=(r.size/1048576).toFixed(1);
+    $("#backupStatus").innerHTML=`✓ Saved to <span class="mono">${esc(r.archive)}</span> (${mb} MB). Keep this file safe.`;
+    toast("Backup exported");
+  }catch(e){toast(e.message,true)}
+  btn.disabled=false;btn.textContent="Export backup";
+});
+$("#backupRestore").addEventListener("click",async()=>{
+  const path=$("#restorePath").value.trim();
+  if(!path){toast("Enter the path to a backup archive",true);return;}
+  if(!confirm("Restore from this backup? Existing PCC data will be overwritten by the archive's contents."))return;
+  const btn=$("#backupRestore");btn.disabled=true;btn.textContent="Restoring…";
+  try{
+    const r=await post("/api/backup/restore",{archive:path});
+    $("#backupStatus").textContent=`✓ Restored ${r.data} data file(s)`+(r.mangohud?" + MangoHud config":"")+". Restart the backend to see everything.";
+    toast("Backup restored");
+  }catch(e){toast(e.message,true)}
+  btn.disabled=false;btn.textContent="Restore";
+});
+
+/* ---------- proton versions ---------- */
+async function loadProtonList(){
+  const el=$("#protonList");if(!el)return;
+  try{
+    const d=await api("/api/proton/list");
+    if(d.error){el.innerHTML=`<p class="note">Couldn't reach GitHub: ${esc(d.error)}</p>`;return;}
+    const head=d.up_to_date
+      ? `<p class="note" style="color:var(--dlss)">✓ Newest GE-Proton (${esc(d.newest||"")}) is installed</p>`
+      : `<p class="note" style="color:var(--cache)">Update available: ${esc(d.newest||"")}</p>`;
+    el.innerHTML=head+d.releases.slice(0,6).map(r=>`
+      <div class="row" style="justify-content:space-between;margin-top:6px">
+        <span class="mono" style="font-size:12px">${esc(r.tag)} ${r.installed?'<span class="chip g" style="padding:1px 7px">installed</span>':''}</span>
+        ${r.installed?"":`<button class="btn" data-ptag="${esc(r.tag)}" data-purl="${esc(r.url)}" style="padding:4px 10px;font-size:12px">Install</button>`}
+      </div>`).join("");
+    el.querySelectorAll("[data-ptag]").forEach(b=>b.addEventListener("click",async()=>{
+      b.disabled=true;b.textContent="Installing…";
+      try{
+        const {task}=await post("/api/proton/install",{tag:b.dataset.ptag,url:b.dataset.purl});
+        const iv=setInterval(async()=>{
+          try{
+            const t=await api("/api/tasks/"+task);
+            if(t.detail)b.textContent=t.detail.length>18?t.detail.slice(0,18)+"…":t.detail;
+            if(t.status==="done"||t.status==="error"){
+              clearInterval(iv);toast(t.detail,t.status==="error");loadProtonList();
+            }
+          }catch(e){clearInterval(iv);b.disabled=false;b.textContent="Install"}
+        },1000);
+      }catch(e){toast(e.message,true);b.disabled=false;b.textContent="Install"}
+    }));
+  }catch(e){el.innerHTML=`<p class="note">${esc(e.message)}</p>`}
+}
+
 $("#saveKey").addEventListener("click",async()=>{
   try{
     await post("/api/settings",{sgdb_api_key:$("#sgdbKey").value});
