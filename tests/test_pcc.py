@@ -802,6 +802,24 @@ class PCCTests(unittest.TestCase):
             pcc._gh_json = real
         self.assertEqual(r["releases"][0]["url"], "http://x/x86.tar.gz")
 
+    def test_mangohud_short_names_and_order(self):
+        """Overlay shows shortened labels (Ryzen AI 9 365 / RTX 5070) and
+        orders CPU block before GPU block before the frame-time graph."""
+        self.assertEqual(pcc._short_gpu_name("NVIDIA GeForce RTX 5070 Laptop GPU"),
+                         "RTX 5070")
+        self.assertEqual(pcc._short_cpu_name("AMD Ryzen AI 9 365 w/ Radeon 880M"),
+                         "Ryzen AI 9 365")
+        hw = {"cpu": "AMD Ryzen AI 9 365 w/ Radeon 880M", "cores": 10,
+              "gpus": [{"name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+                        "vendor": "NVIDIA", "pci_dev": "0000:63:00.0",
+                        "vram_mb": 8151, "discrete": True}],
+              "hybrid": False, "font": None}
+        cfg = pcc.mangohud_config("reference", hw)
+        self.assertIn("cpu_text=Ryzen AI 9 365", cfg)
+        self.assertIn("gpu_text=RTX 5070", cfg)
+        self.assertLess(cfg.index("cpu_stats"), cfg.index("gpu_stats"))
+        self.assertLess(cfg.index("gpu_stats"), cfg.index("frame_timing"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

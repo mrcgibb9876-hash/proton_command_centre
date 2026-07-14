@@ -25,7 +25,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.9.6"
+VERSION = "1.9.7"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -2278,6 +2278,66 @@ def find_font():
     return None
 
 
+def _short_gpu_name(name):
+    """Turn a full GPU string into a compact label for the overlay.
+    'NVIDIA GeForce RTX 5070 Laptop GPU' -> 'RTX 5070'
+    'AMD Radeon 860M Graphics'          -> 'Radeon 860M'."""
+    if not name:
+        return "GPU"
+    n = name.strip()
+    # NVIDIA: 'RTX/GTX <number>' plus optional 'Ti' and/or 'Super'
+    m = re.search(r"\b(RTX|GTX)\s*(\d{3,4})\s*(Ti)?\s*(Super)?", n, re.I)
+    if m and m.group(2):
+        parts = [m.group(1).upper(), m.group(2)]
+        if m.group(3):
+            parts.append("Ti")
+        if m.group(4):
+            parts.append("Super")
+        return " ".join(parts)
+    m = re.search(r"Radeon\s+([A-Z]*\s*\d{3,4}\s*[A-Z]{0,2})", n, re.I)
+    if m:
+        return f"Radeon {m.group(1).strip()}"
+    m = re.search(r"\bArc\s+([A-Z]?\d{3,4})", n, re.I)
+    if m:
+        return f"Arc {m.group(1)}"
+    for junk in ("NVIDIA", "GeForce", "AMD", "Radeon", "Intel", "Graphics",
+                 "Laptop", "GPU", "(R)", "(TM)"):
+        n = re.sub(rf"\b{re.escape(junk)}\b", "", n, flags=re.I)
+    n = re.sub(r"\s+", " ", n).strip(" -")
+    return n[:18] or "GPU"
+
+
+def _short_cpu_name(name):
+    """Compact CPU label. 'AMD Ryzen AI 9 365 w/ Radeon...' -> 'Ryzen AI 9 365'.
+    'AMD Ryzen 7 7800X3D 8-Core...'     -> 'Ryzen 7 7800X3D'.
+    '13th Gen Intel Core i7-13700K'     -> 'Core i7-13700K'."""
+    if not name:
+        return "CPU"
+    # strip trademark markers up front so they don't break matching
+    n = re.sub(r"\((?:R|TM)\)", "", name, flags=re.I).strip()
+    # AMD Ryzen (incl. 'Ryzen AI 9 365')
+    m = re.search(r"Ryzen\s+(AI\s+)?(\d+)\s+([\w-]+)", n, re.I)
+    if m:
+        ai = "AI " if m.group(1) else ""
+        return f"Ryzen {ai}{m.group(2)} {m.group(3)}"
+    # Intel Core i3/i5/i7/i9 and Core Ultra
+    m = re.search(r"Core\s+(i[3579])-?(\w+)?", n, re.I)
+    if m:
+        suffix = f"-{m.group(2)}" if m.group(2) else ""
+        return f"Core {m.group(1)}{suffix}"
+    m = re.search(r"Core\s+Ultra\s+(\d)\s*(\w+)?", n, re.I)
+    if m:
+        suffix = f" {m.group(2)}" if m.group(2) else ""
+        return f"Core Ultra {m.group(1)}{suffix}"
+    # fallback: strip vendor/marketing, cut at 'with'/'w/'
+    n = re.split(r"\bw(?:ith|/)\b", n, flags=re.I)[0]
+    for junk in ("AMD", "Intel", "Processor", "CPU", "Gen"):
+        n = re.sub(rf"\b{re.escape(junk)}\b", "", n, flags=re.I)
+    n = re.sub(r"\d+(?:th|st|nd|rd)?\s*-?\s*Core.*", "", n, flags=re.I)
+    n = re.sub(r"\s+", " ", n).strip(" -")
+    return n[:20] or "CPU"
+
+
 def cpu_name():
     try:
         for line in Path("/proc/cpuinfo").read_text().splitlines():
@@ -2395,23 +2455,25 @@ MANGOHUD_STYLE = {
 }
 
 MANGOHUD_PRESETS = {
-    # GPU name + load% + temp + VRAM used | CPU name + load% + temp | FPS + graph
-    "reference": ["gpu_name", "gpu_stats", "gpu_load_change", "gpu_temp",
-                  "vram", "cpu_name", "cpu_stats", "cpu_load_change",
-                  "cpu_temp", "fps", "frame_timing=1"],
-    "minimal": ["fps", "frame_timing=1", "gpu_stats", "cpu_stats"],
-    "standard": ["fps", "fps_color_change", "frame_timing=1", "gpu_stats",
-                 "gpu_temp", "gpu_load_change", "vram", "cpu_stats",
-                 "cpu_temp", "cpu_load_change", "ram"],
+    # Order: CPU block, then GPU block, then FPS + frame-time graph.
+    # gpu_name/cpu_name are intentionally omitted so the overlay doesn't print
+    # the long device-name prefix (e.g. "NVIDIA GeForce RTX 5070 Laptop").
+    "reference": ["cpu_name", "cpu_stats", "cpu_load_change", "cpu_temp",
+                  "gpu_name", "gpu_stats", "gpu_load_change", "gpu_temp",
+                  "vram", "fps", "frame_timing=1"],
+    "minimal": ["fps", "frame_timing=1", "cpu_stats", "gpu_stats"],
+    "standard": ["fps", "fps_color_change", "frame_timing=1", "cpu_name",
+                 "cpu_stats", "cpu_temp", "cpu_load_change", "ram", "gpu_name",
+                 "gpu_stats", "gpu_temp", "gpu_load_change", "vram"],
     "benchmark": ["fps", "fps_color_change", "frame_timing=1", "histogram",
-                  "gpu_stats", "gpu_temp", "gpu_power", "gpu_load_change",
-                  "vram", "cpu_stats", "cpu_temp", "cpu_power",
-                  "cpu_load_change", "ram", "swap", "io_read", "io_write",
+                  "cpu_stats", "cpu_temp", "cpu_power", "cpu_load_change",
+                  "ram", "swap", "gpu_stats", "gpu_temp", "gpu_power",
+                  "gpu_load_change", "vram", "io_read", "io_write",
                   "vulkan_driver", "engine_version", "resolution",
                   "benchmark_percentiles=AVG,1,0.1"],
     "stutter": ["fps", "frame_timing=1", "histogram", "frametime",
-                "gpu_stats", "gpu_load_change", "cpu_stats",
-                "cpu_load_change", "throttling_status", "present_mode"],
+                "cpu_stats", "cpu_load_change", "gpu_stats",
+                "gpu_load_change", "throttling_status", "present_mode"],
 }
 
 
@@ -2442,6 +2504,16 @@ def mangohud_config(preset="reference", hw=None, pin_gpu=None,
     if hw.get("font"):
         lines.append(f"font_file={hw['font']}")
     lines.append("text_outline")
+
+    # Short custom labels so the overlay shows "Ryzen AI 9 365" / "RTX 5070"
+    # instead of the full auto-detected marketing string.
+    cpu_lbl = _short_cpu_name(hw.get("cpu"))
+    if cpu_lbl:
+        lines.append(f"cpu_text={cpu_lbl}")
+    disc = next((g for g in hw["gpus"] if g.get("discrete")), None) \
+        or (hw["gpus"][0] if hw["gpus"] else None)
+    if disc:
+        lines.append(f"gpu_text={_short_gpu_name(disc.get('name'))}")
 
     if hw["hybrid"]:
         target = pin_gpu or next((g["pci_dev"] for g in hw["gpus"]
