@@ -25,7 +25,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.9.5"
+VERSION = "1.9.6"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -2635,8 +2635,17 @@ def list_ge_proton(limit=10):
             return {"error": str(e), "releases": []}
         rels = []
         for r in data[:limit]:
-            asset = next((a for a in r.get("assets", [])
-                          if a["name"].endswith(".tar.gz")), None)
+            # GE-Proton 11+ ships both x86_64 and aarch64 (ARM) tarballs.
+            # The x86_64 asset is named like "GE-Proton11-1.tar.gz" (no arch
+            # suffix); ARM is "GE-Proton11-1-aarch64.tar.gz". Pick x86_64 and
+            # never the ARM build (which breaks on x64 — see GE issue #569).
+            def _is_x86(a):
+                n = a.get("name", "")
+                return (n.endswith(".tar.gz")
+                        and "aarch64" not in n
+                        and "arm64" not in n
+                        and not n.endswith(".sha512sum"))
+            asset = next((a for a in r.get("assets", []) if _is_x86(a)), None)
             if not asset:
                 continue
             rels.append({"tag": r["tag_name"],

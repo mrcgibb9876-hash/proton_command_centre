@@ -779,6 +779,29 @@ class PCCTests(unittest.TestCase):
         self.assertEqual((m.group(1), m.group(2), round(float(m.group(3)))),
                          ("2560", "1600", 165))
 
+    def test_ge_proton_selects_x86_not_arm(self):
+        """GE-Proton 11+ ships aarch64 + x86_64 tarballs; must pick x86_64 even
+        when the ARM build is listed first (regression: was grabbing ARM)."""
+        import tempfile as _tf
+        pcc.STATE_FILE = Path(_tf.mktemp())
+        pcc.COMPAT_INSTALL_DIR = Path(self.tmp.name) / "compat_arch"
+        pcc.COMPAT_INSTALL_DIR.mkdir()
+        mock = [{"tag_name": "GE-Proton11-1", "name": "GE-Proton11-1",
+                 "published_at": "2026-06-20T00:00:00Z",
+                 "assets": [
+                     {"name": "GE-Proton11-1-aarch64.tar.gz",
+                      "browser_download_url": "http://x/arm.tar.gz", "size": 4},
+                     {"name": "GE-Proton11-1.tar.gz",
+                      "browser_download_url": "http://x/x86.tar.gz", "size": 4},
+                 ]}]
+        real = pcc._gh_json
+        pcc._gh_json = lambda u: mock
+        try:
+            r = pcc.list_ge_proton()
+        finally:
+            pcc._gh_json = real
+        self.assertEqual(r["releases"][0]["url"], "http://x/x86.tar.gz")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

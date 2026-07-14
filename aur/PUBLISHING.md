@@ -6,13 +6,13 @@ Everything needed is in `aur/` — this is the checklist to go live.
 
 ```bash
 git init && git add -A && git commit -m "Proton Command Center v1.1.0"
-git remote add origin git@github.com:mrcgibb9876-hash/proton_command_centre.git
+git remote add origin git@github.com:mrcgibb9876-hash/proton_command_center.git
 git push -u origin main
 git tag v1.1.0 && git push --tags
 ```
 
 The PKGBUILDs already point at your repo
-(github.com/mrcgibb9876-hash/proton_command_centre) — no username
+(github.com/mrcgibb9876-hash/proton_command_center) — no username
 substitution needed. Just make sure the repo root contains `pcc.py`,
 `index.html`, `README.md`, `LICENSE`, and the `packaging/` directory,
 since the package installs from those paths.

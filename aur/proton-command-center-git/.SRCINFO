@@ -2,7 +2,7 @@ pkgbase = proton-command-center-git
 	pkgdesc = Per-game launch options, Proton selection, DLSS DLL management, shader precompilation, and benchmarks for Steam on Linux (git version)
 	pkgver = 1.1.0.r0.g0000000
 	pkgrel = 1
-	url = https://github.com/mrcgibb9876-hash/proton_command_centre
+	url = https://github.com/mrcgibb9876-hash/proton_command_center
 	arch = any
 	license = MIT
 	makedepends = git
@@ -15,7 +15,7 @@ pkgbase = proton-command-center-git
 	optdepends = nvidia-utils: DLSS DLL management and driver-aware compile tracking
 	provides = proton-command-center
 	conflicts = proton-command-center
-	source = proton-command-center::git+https://github.com/mrcgibb9876-hash/proton_command_centre.git
+	source = proton-command-center::git+https://github.com/mrcgibb9876-hash/proton_command_center.git
 	sha256sums = SKIP
 
 pkgname = proton-command-center-git
