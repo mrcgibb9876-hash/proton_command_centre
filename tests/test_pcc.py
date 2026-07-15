@@ -46,7 +46,7 @@ def make_mock_steam(base: Path) -> Path:
 
 class PCCTests(unittest.TestCase):
     _ORIGINALS = ("steam_running", "driver_version", "_nvidia_gpus", "_drm_gpus",
-                  "cpu_name", "find_font", "find_fossilize", "gpu_vram_mb",
+                  "cpu_name", "find_font", "gpu_vram_mb",
                   "shutdown_steam", "is_handheld", "subprocess", "MANGOHUD_DIR")
 
     def setUp(self):
@@ -224,28 +224,6 @@ class PCCTests(unittest.TestCase):
             (cache / "fozpipelinesv6/steam_pipeline_cache.foz").exists())
         self.assertFalse((cache / "compiled_artifact.foz").exists())
         self.assertEqual(r["kept_recordings"], 1)
-
-    def test_foz_classification_real_layout(self):
-        """Pipelines live inside steamapprun_pipeline_cache.<hash>/ dirs too;
-        whitelists, the replay ledger, and driver caches are never replayed."""
-        fp = self.root / "steamapps/shadercache/12345/fozpipelinesv6"
-        h = fp / "steamapprun_pipeline_cache.3554f158047e28bf"
-        h.mkdir(parents=True, exist_ok=True)
-        (h / "steam_pipeline_cache.foz").write_bytes(b"x")
-        (h / "steamapprun_pipeline_cache.2db00e3ed998437d.1.foz").write_bytes(b"x")
-        (h / "steam_pipeline_cache_whitelist.foz").write_bytes(b"w")
-        (h / "replay_cache.8652dd52d95f2f26.foz").write_bytes(b"L")
-        rad = (self.root / "steamapps/shadercache/12345/mesa_shader_cache_sf/a/RADV")
-        rad.mkdir(parents=True)
-        (rad / "foz_cache.foz").write_bytes(b"d")
-        foz = pcc.find_foz(self.root, "12345")
-        names = [Path(f).name for f in foz]
-        self.assertIn("steamapprun_pipeline_cache.2db00e3ed998437d.1.foz", names)
-        self.assertTrue(all("whitelist" not in n for n in names))
-        self.assertTrue(all(not n.startswith("replay_cache") for n in names))
-        self.assertTrue(all("mesa_shader_cache" not in f for f in foz))
-        self.assertTrue(pcc.find_replayer_cache(self.root, "12345")
-                        .endswith("replay_cache.8652dd52d95f2f26.foz"))
 
     def test_skip_list(self):
         self.assertIn("1493710", pcc.SKIP_APPIDS)
@@ -506,31 +484,6 @@ class PCCTests(unittest.TestCase):
         r = pcc.auto_tune(self.root, "12345")
         self.assertIn("PROTON_ENABLE_NVAPI=1", r["launch_string"])
         self.assertIn("dxgi.maxDeviceMemory=7164", r["launch_string"])
-        self.assertTrue(r["precompile_recommended"])
-
-    def test_replayer_cache_integration(self):
-        """Our replay must write into Steam's ledger so Steam skips its own
-        'Processing Vulkan shaders' pass — and never replay the ledger as input."""
-        base = self.root / "steamapps/shadercache/12345/fozpipelinesv6"
-        ledger_dir = base / "steamapprun_pipeline_cache.abc123"
-        ledger_dir.mkdir()
-        (ledger_dir / "steam_pipeline_cache.foz").write_bytes(b"src")
-        ledger = ledger_dir / "replay_cache.deadbeef.foz"
-        ledger.write_bytes(b"ledger")
-        srcs = pcc.find_foz(self.root, "12345")
-        self.assertTrue(any("steamapprun_pipeline_cache.abc123" in s for s in srcs))
-        self.assertEqual(pcc.find_replayer_cache(self.root, "12345"),
-                         str(ledger))
-        calls = []
-        pcc.find_fossilize = lambda: "/usr/bin/fossilize_replay"
-        real = pcc.subprocess.run
-        pcc.subprocess.run = lambda cmd, **kw: (
-            calls.append(cmd), type("R", (), {"returncode": 0})())[1]
-        try:
-            pcc.precompile_cache("tt", self.root, "12345", 0)
-        finally:
-            pcc.subprocess.run = real
-        self.assertTrue(all("--replayer-cache" in c for c in calls))
 
     def test_steam_shader_settings_discovery_and_write(self):
         cfg = self.root / "userdata/12345678/config/localconfig.vdf"
@@ -819,6 +772,70 @@ class PCCTests(unittest.TestCase):
         self.assertIn("gpu_text=RTX 5070", cfg)
         self.assertLess(cfg.index("cpu_stats"), cfg.index("gpu_stats"))
         self.assertLess(cfg.index("gpu_stats"), cfg.index("frame_timing"))
+
+    def test_stateflags_bitfield_and_stale_bytes(self):
+        """StateFlags is a bitfield, and Steam leaves BytesDownloaded stale
+        after a download finishes. Regression: a finished game showed a stuck
+        percentage ("3% done" while Steam said installed), and queued/paused
+        games read as 'forever downloading' because of a naive flags != 4."""
+        # verified real-world values (see _is_installing docstring)
+        self.assertFalse(pcc._is_installing(4))       # done
+        self.assertTrue(pcc._is_installing(1026))     # fresh download
+        self.assertTrue(pcc._is_installing(1062))     # repair
+        self.assertFalse(pcc._is_installing(0))       # odd manifest
+
+        lib = self.root / "steamapps"
+        (lib / "common" / "DoneGame").mkdir(parents=True, exist_ok=True)
+        # StateFlags says fully installed, but the byte counters are stale at 3%
+        (lib / "appmanifest_555.acf").write_text(
+            '"AppState"\n{\n"appid" "555"\n"name" "DoneGame"\n'
+            '"installdir" "DoneGame"\n"StateFlags" "4"\n'
+            '"BytesDownloaded" "3"\n"BytesToDownload" "100"\n'
+            '"SizeOnDisk" "100"\n}\n')
+        g = next(x for x in pcc.list_games(self.root) if x["appid"] == "555")
+        self.assertTrue(g["fully_installed"])
+        self.assertIsNone(g["download_pct"])   # NOT 3.0
+
+    def test_display_mode_never_runs_qt_tool_without_display(self):
+        """Regression: kscreen-doctor is a Qt app that qFatal()s and dumps core
+        when it can't reach a display. The backend runs as a systemd user
+        service with no WAYLAND_DISPLAY of its own, so Qt fell back to xcb,
+        found no DISPLAY either, and aborted -> repeated coredumps in the
+        journal. It must not be invoked at all without a reachable session."""
+        calls = []
+
+        class FakeRun:
+            def __init__(self, out=""):
+                self.stdout = out
+
+        def fake_run(cmd, **kw):
+            calls.append((cmd, kw))
+            return FakeRun("1:2560x1600@165.00*!")
+
+        real_run, real_which = pcc.subprocess.run, pcc.shutil.which
+        real_senv = pcc.session_env
+        pcc.shutil.which = lambda n: "/usr/bin/kscreen-doctor"
+        pcc.subprocess.run = fake_run
+        try:
+            # no display anywhere -> must NOT invoke the Qt tool
+            pcc.session_env = lambda: {}
+            pcc.detect_display_mode()
+            self.assertEqual(calls, [], "ran kscreen-doctor with no display")
+
+            # display present -> runs it, with the session env and a pinned
+            # platform plugin so Qt can't fall back to xcb on Wayland
+            pcc.session_env = lambda: {"WAYLAND_DISPLAY": "wayland-0",
+                                       "XDG_RUNTIME_DIR": "/run/user/1000"}
+            mode = pcc.detect_display_mode()
+            self.assertEqual(len(calls), 1)
+            env = calls[0][1]["env"]
+            self.assertEqual(env["WAYLAND_DISPLAY"], "wayland-0")
+            self.assertEqual(env["QT_QPA_PLATFORM"], "wayland")
+            self.assertEqual(mode, {"width": 2560, "height": 1600,
+                                    "refresh": 165})
+        finally:
+            pcc.subprocess.run, pcc.shutil.which = real_run, real_which
+            pcc.session_env = real_senv
 
 
 if __name__ == "__main__":

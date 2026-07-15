@@ -25,7 +25,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.9.7"
+VERSION = "1.10.1"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -256,24 +256,6 @@ def find_foz(root, appid):
     return sorted(set(out))
 
 
-def find_replayer_cache(root, appid):
-    """Steam's replay ledger (replay_cache.<hash>.foz). Passing this to
-    fossilize_replay records our work where Steam looks, so its own pass
-    finds the pipelines already done. Newest wins if several exist."""
-    hits = []
-    for lib in library_folders(root):
-        base = lib / "shadercache" / str(appid) / "fozpipelinesv6"
-        if not base.is_dir():
-            continue
-        for p in base.rglob("*.foz"):
-            if FOZ_LEDGER_RE.match(p.name):
-                hits.append(p)
-    if not hits:
-        return None
-    hits.sort(key=lambda p: p.stat().st_mtime)
-    return str(hits[-1])
-
-
 def foz_fingerprint(foz_files):
     if not foz_files:
         return None
@@ -475,6 +457,35 @@ SKIP_NAME_RE = re.compile(
     r"steam client|steam sdk|dedicated server)", re.I)
 
 
+# Steam's StateFlags is a BITFIELD (EAppState), not a single value. Verified
+# against real manifests: 4 = fully installed; 1026 = 1024|2 (update started +
+# update required); 1062 = 1024|32|4|2 (update started + files missing + fully
+# installed + update required, i.e. a repair). Treating it as a plain value
+# (flags != 4) made queued/paused/repairing games look "forever downloading".
+APP_UPDATE_REQUIRED = 2
+APP_FULLY_INSTALLED = 4
+APP_FILES_MISSING = 32
+APP_UPDATE_RUNNING = 256
+APP_UPDATE_PAUSED = 512
+APP_UPDATE_STARTED = 1024
+
+_APP_BUSY = (APP_UPDATE_REQUIRED | APP_FILES_MISSING | APP_UPDATE_RUNNING
+             | APP_UPDATE_PAUSED | APP_UPDATE_STARTED)
+
+
+def _is_installing(flags):
+    """True when Steam has real pending work for this app.
+
+    A game is done only when FullyInstalled is set and no update/repair bit is.
+    Flags of 0 (odd/missing manifest) must never mean 'forever downloading'.
+    """
+    if not flags:
+        return False
+    if flags & APP_FULLY_INSTALLED and not (flags & _APP_BUSY):
+        return False
+    return bool(flags & _APP_BUSY)
+
+
 def list_games(root):
     games = []
     seen = set()
@@ -497,18 +508,23 @@ def list_games(root):
             flags = int(ci_get(app, "StateFlags") or 0)
             downloaded = int(ci_get(app, "BytesDownloaded") or 0)
             to_download = int(ci_get(app, "BytesToDownload") or 0)
-            # Only treat as "installing" when there is real pending work:
-            # a missing/odd StateFlags must never mean 'forever downloading'.
-            installing = (flags != 4 and to_download > 0
-                          and downloaded < to_download)
+            installing = _is_installing(flags)
+            # Steam does NOT reset BytesDownloaded when a download finishes, so
+            # the counters go stale. StateFlags is authoritative: if it says
+            # done, report done regardless of the bytes (this is what caused
+            # "3% forever" while Steam showed the game as installed).
+            pct = None
+            if installing and to_download > 0:
+                pct = round(min(100.0, 100 * downloaded / to_download), 1)
             games.append({
                 "appid": appid,
                 "name": name or installdir or appid,
                 "install_path": str(install_path),
-                "installed": install_path.is_dir(),
+                # A game being downloaded has a manifest before Steam creates
+                # the directory, so a pending install must still count as known.
+                "installed": install_path.is_dir() or installing,
                 "fully_installed": not installing,
-                "download_pct": round(100 * downloaded / to_download, 1)
-                                if installing else None,
+                "download_pct": pct,
                 "size_bytes": int(ci_get(app, "SizeOnDisk") or 0),
                 "library": str(lib),
             })
@@ -1309,29 +1325,6 @@ def fetch_owned_games(root, force=False):
 
 
 
-def install_progress(root):
-    """Cheap poll: manifest-only install state for every game."""
-    out = []
-    for g in list_games(root):
-        out.append({
-            "appid": g["appid"],
-            "name": g["name"],
-            "installed": g["installed"],
-            "fully_installed": g["fully_installed"],
-            "download_pct": g["download_pct"],
-            "size_bytes": g["size_bytes"],
-        })
-    return out
-
-
-def install_game(appid):
-    exe = shutil.which("steam")
-    if not exe:
-        raise RuntimeError("'steam' command not found in PATH")
-    return _spawn_detached([exe, f"steam://install/{appid}"])
-
-
-
 # --------------------------------------------------------------------------
 # Auto-tune: engine detection + curated tuning rules
 # --------------------------------------------------------------------------
@@ -2062,125 +2055,6 @@ def clear_cache(root, appid, keep_recordings=True):
     return {"cleared": cleared, "kept_recordings": kept}
 
 
-def find_fossilize():
-    exe = shutil.which("fossilize_replay") or shutil.which("fossilize-replay")
-    if exe:
-        return exe
-    root = steam_root()
-    if root:
-        hits = list(root.glob("ubuntu12_64/fossilize_replay")) + \
-               list(root.glob("steamapps/common/SteamLinuxRuntime*/**/fossilize_replay"))
-        if hits:
-            return str(hits[0])
-    return None
-
-
-def precompile_cache(task_id, root, appid, device_index=0):
-    TASKS[task_id] = {"status": "running", "progress": 0, "detail": "Locating fossilize_replay"}
-    exe = find_fossilize()
-    if not exe:
-        TASKS[task_id] = {"status": "error", "progress": 0,
-                          "detail": "fossilize_replay not found (install fossilize or run once from Steam)"}
-        return
-    foz_files = find_foz(root, appid)
-    if not foz_files:
-        TASKS[task_id] = {"status": "error", "progress": 0,
-                          "detail": "No .foz pipeline files found — launch the game once so Steam collects them"}
-        return
-    rcache = find_replayer_cache(root, appid)
-    done = 0
-    for foz in foz_files:
-        TASKS[task_id]["detail"] = f"Replaying {Path(foz).name}"
-        cmd = [exe, "--device-index", str(device_index),
-               "--num-threads", str(max(1, (os.cpu_count() or 4) - 2))]
-        if rcache:
-            cmd += ["--replayer-cache", rcache]
-        cmd.append(foz)
-        try:
-            subprocess.run(cmd, capture_output=True, timeout=3600)
-        except Exception as e:
-            TASKS[task_id] = {"status": "error", "progress": 0, "detail": f"{Path(foz).name}: {e}"}
-            return
-        done += 1
-        TASKS[task_id]["progress"] = int(done / len(foz_files) * 100)
-    mark_compiled(root, appid)
-    TASKS[task_id] = {"status": "done", "progress": 100,
-                      "detail": f"Replayed {done} pipeline database(s)"
-                                + (" — results recorded in Steam's cache, so "
-                                   "Steam should skip its own processing pass"
-                                   if rcache else
-                                   " — note: Steam hasn't created its "
-                                   "pipeline ledger for this game yet; its "
-                                   "first processing pass may still run")}
-
-
-def precompile_all(task_id, root, device_index=0, skip_compiled=True):
-    TASKS[task_id] = {"status": "running", "progress": 0, "detail": "Scanning library"}
-    exe = find_fossilize()
-    if not exe:
-        TASKS[task_id] = {"status": "error", "progress": 0,
-                          "detail": "fossilize_replay not found"}
-        return
-    state = load_state()
-    drv = driver_version()
-    todo = []
-    for g in list_games(root):
-        foz = find_foz(root, g["appid"])
-        if not foz:
-            continue
-        if skip_compiled:
-            st = compiled_status(root, g["appid"], state, drv)
-            if st["compiled"] and not st.get("outdated"):
-                continue
-        todo.append((g, foz))
-    if not todo:
-        TASKS[task_id] = {"status": "done", "progress": 100,
-                          "detail": "Everything already compiled — nothing to do"}
-        return
-    threads = str(max(1, (os.cpu_count() or 4) - 2))
-    total_files = sum(len(f) for _, f in todo)
-    done_files = 0
-    skipped = []
-    for gi, (g, foz_files) in enumerate(todo):
-        rcache = find_replayer_cache(root, g["appid"])
-        game_ok = True
-        for foz in foz_files:
-            done_files += 1
-            TASKS[task_id]["detail"] = (f'{g["name"]} — {Path(foz).name} '
-                                        f'({done_files}/{total_files})')
-            TASKS[task_id]["progress"] = int(done_files / total_files * 100)
-            cmd = [exe, "--device-index", str(device_index),
-                   "--num-threads", threads]
-            if rcache:
-                cmd += ["--replayer-cache", rcache]
-            cmd.append(foz)
-            try:
-                # Per-file cap of 10 min. A stuck/huge foz no longer freezes the
-                # whole batch — it's skipped and the run continues.
-                subprocess.run(cmd, capture_output=True, timeout=600)
-            except subprocess.TimeoutExpired:
-                game_ok = False
-                skipped.append(g["name"])
-                TASKS[task_id]["detail"] = (f'{g["name"]} took too long — '
-                                            f'skipped, continuing')
-                continue
-            except Exception:
-                # a single bad file shouldn't kill the whole library run
-                game_ok = False
-                skipped.append(g["name"])
-                continue
-        if game_ok:
-            mark_compiled(root, g["appid"])
-    msg = f"Compiled {len(todo) - len(set(skipped))} game(s)"
-    if skipped:
-        uniq = list(dict.fromkeys(skipped))
-        msg += f"; skipped {len(uniq)} (took too long): {', '.join(uniq[:3])}"
-        if len(uniq) > 3:
-            msg += f" +{len(uniq) - 3} more"
-    TASKS[task_id] = {"status": "done", "progress": 100, "detail": msg}
-
-
-
 # --------------------------------------------------------------------------
 # Steam's own shader processing ("Processing Vulkan shaders" at launch)
 # --------------------------------------------------------------------------
@@ -2554,12 +2428,22 @@ def detect_display_mode():
     gamescope command. On KDE Wayland, kscreen-doctor reports the active mode
     (marked with '*'). Falls back to /sys/class/drm modes for resolution and a
     sane 60 Hz default. Returns {'width','height','refresh'} or None."""
-    # 1) kscreen-doctor (KDE Wayland) — has both res AND refresh
+    # 1) kscreen-doctor (KDE Wayland) — has both res AND refresh.
+    # It's a Qt GUI app: with no reachable display it does NOT fail politely,
+    # it qFatal()s and dumps core. The backend runs as a systemd user service
+    # and so may have no WAYLAND_DISPLAY of its own, in which case Qt falls
+    # back to the xcb plugin, finds no DISPLAY either, and aborts. So: harvest
+    # the real session env, skip the call entirely if there's still no display,
+    # and pin the platform plugin so Qt can't wander off to xcb on Wayland.
     kd = shutil.which("kscreen-doctor")
-    if kd:
+    env = session_env()
+    if kd and (env.get("WAYLAND_DISPLAY") or env.get("DISPLAY")):
+        env = dict(env)
+        if env.get("WAYLAND_DISPLAY") and not env.get("QT_QPA_PLATFORM"):
+            env["QT_QPA_PLATFORM"] = "wayland"
         try:
             out = subprocess.run([kd, "-o"], capture_output=True, text=True,
-                                 timeout=5).stdout
+                                 timeout=5, env=env).stdout
             # active mode looks like:  1:2560x1600@165.00*!  (star = current).
             # Refresh may carry decimals, so match them and round to int.
             m = re.search(r"(\d+)x(\d+)@(\d+(?:\.\d+)?)\*", out)
@@ -2798,7 +2682,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({
                     "steam_root": str(root) if root else None,
                     "steam_running": steam_running(),
-                    "fossilize": find_fossilize(),
                     "driver": driver_version(),
                     "version": VERSION,
                     "started_at": STARTED_AT,
@@ -3013,23 +2896,6 @@ class Handler(BaseHTTPRequestHandler):
             elif m := re.match(r"^/api/game/(\d+)/cache/clear$", self.path):
                 self._json(clear_cache(root, m.group(1),
                                        keep_recordings=body.get("keep_recordings", True)))
-            elif self.path == "/api/precompile_all":
-                tid = str(uuid.uuid4())
-                threading.Thread(
-                    target=precompile_all,
-                    args=(tid, root, int(body.get("device_index", 0))),
-                    kwargs={"skip_compiled": body.get("skip_compiled", True)},
-                    daemon=True,
-                ).start()
-                self._json({"task": tid})
-            elif m := re.match(r"^/api/game/(\d+)/cache/precompile$", self.path):
-                tid = str(uuid.uuid4())
-                threading.Thread(
-                    target=precompile_cache,
-                    args=(tid, root, m.group(1), int(body.get("device_index", 0))),
-                    daemon=True,
-                ).start()
-                self._json({"task": tid})
             else:
                 self._json({"error": "not found"}, 404)
         except RuntimeError as e:

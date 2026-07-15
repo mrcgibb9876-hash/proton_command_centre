@@ -27,6 +27,17 @@ h1,h2,h3,.tab,.chip,.btn{font-family:"Chakra Petch","Inter",sans-serif}
 code,.mono,textarea,input[type=text]{font-family:"JetBrains Mono",monospace}
 button{cursor:pointer;border:0;background:none;color:inherit;font:inherit}
 :focus-visible{outline:2px solid var(--launch);outline-offset:2px}
+/* Gamepad nav: programmatic focus() doesn't reliably trigger :focus-visible,
+   so the pad marks its own target. Only shown while a pad is connected. */
+body.gp-active .gp-focus{outline:3px solid var(--launch);outline-offset:3px;border-radius:8px}
+body.gp-active .card.gp-focus{outline-offset:4px;transform:translateY(-2px)}
+#gpHint{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:60;
+  background:var(--panel2);border:1px solid var(--line);border-radius:999px;
+  padding:7px 18px;font-size:12.5px;color:var(--muted);display:none;gap:15px;
+  align-items:center;box-shadow:0 8px 28px #0009;pointer-events:none;white-space:nowrap}
+#gpHint.show{display:flex}
+#gpHint b{color:var(--ink);font-weight:600}
+@media (max-width:640px){#gpHint{display:none!important}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 
 /* top bar */
@@ -224,13 +235,16 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
     <span class="l1"><i></i>Launch options set</span>
     <span class="l2"><i></i>DLSS detected</span>
     <span class="l3"><i></i>Shader cache present</span>
-    <span class="l4"><i style="background:var(--compiled)"></i>Shaders compiled</span>
   </div>
   <div id="grid"></div>
   <div id="empty" hidden>No games found. Is Steam installed with at least one game?</div>
 </main>
 
 <div id="overlay"></div>
+<div id="gpHint">
+  <span><b>D-pad</b> move</span><span><b>A</b> select</span><span><b>B</b> back</span>
+  <span><b>X</b> play</span><span><b>LB/RB</b> tabs</span><span><b>Start</b> settings</span>
+</div>
 <aside id="drawer" aria-label="Game settings">
   <div class="hero">
     <img id="dHero" alt="">
@@ -382,14 +396,11 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
     <div class="section">
       <h3>Shaders</h3>
       <div id="cacheList"><p class="note">Checking…</p></div>
-      <div class="row" style="margin-top:14px">
-        <button class="btn violet" id="fixShadersBtn" style="font-size:15px;padding:12px 22px">
-          ⚡ Compile shaders &amp; stop Steam's pass</button>
-      </div>
-      <p class="note" id="fixShadersHint">Compiles this game's shaders here, then turns off Steam's own
-        "Processing Vulkan shaders" screen so it doesn't redo the work at launch.</p>
-      <div class="bar" id="fozBar"><i></i></div>
-      <p class="note" id="fozDetail"></p>
+      <p class="note" style="margin-top:12px">Steam downloads and processes shader
+        pipelines itself. To stop the <b>"Processing Vulkan shaders"</b> screen at
+        launch, turn off <b>Allow background processing of Vulkan shaders</b> in
+        Steam → Settings → Downloads → Shader Pre-Caching. (Shaders then compile
+        during play instead, which can cause brief first-encounter stutter.)</p>
     </div>
     <div class="section">
       <button class="btn" id="advToggle" style="font-size:12px">▸ Advanced</button>
@@ -398,7 +409,6 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
         <div id="steamShader"><p class="note">Checking…</p></div>
         <h3 style="margin-top:18px">Manual actions</h3>
         <div class="row">
-          <button class="btn amber" id="precompileBtn">Precompile only</button>
           <button class="btn danger" id="clearCacheBtn">Clear compiled cache</button>
           <button class="btn danger" id="clearAllBtn">Delete everything</button>
         </div>
@@ -418,7 +428,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
     <div class="section">
       <h3>How it works</h3>
       <p class="note" style="margin:0 0 10px">Save the benchmark launch options below, play for a few
-        minutes, precompile, play again — Command Center splits the MangoHud logs at your compile time
+        minutes, clear the cache, play again — Command Center splits the MangoHud logs at the marked time
         and compares 1% lows (the number shader stutter actually hurts).</p>
       <div class="row">
         <button class="btn violet" id="benchSave">Save benchmark launch options</button>
@@ -448,7 +458,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 
 <script>
 "use strict";
-const FRONTEND_VERSION="1.9.7";
+const FRONTEND_VERSION="1.10.1";
 const $=s=>document.querySelector(s);
 const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
 const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
@@ -658,8 +668,7 @@ function railFor(g){
   return `<div class="rail">
     <i class="launch ${st.launch?"lit":""}"></i>
     <i class="dlss ${st.dlss?"lit":""}"></i>
-    <i class="cache ${st.cache?"lit":""}"></i>
-    <i class="compiled ${st.compiled?"lit":""}"></i></div>`;
+    <i class="cache ${st.cache?"lit":""}"></i></div>`;
 }
 let ownedOnly=[];   // owned but not installed
 function renderGrid(filter=""){
@@ -730,6 +739,150 @@ function switchTab(name){
 document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>switchTab(t.dataset.tab)));
 function closeDrawer(){$("#drawer").classList.remove("open");$("#overlay").classList.remove("open");
   document.body.classList.remove("locked")}
+
+/* ---------- gamepad navigation ----------------------------------------
+   Standard Gamepad API mapping (Xbox / DualSense / Steam Deck all report it):
+     0 A  1 B  2 X  3 Y   4 LB  5 RB   9 Start   12-15 d-pad, axes 0/1 stick
+   The pad drives real DOM focus, so this also improves keyboard nav for free.
+   The loop only runs while a pad is connected — no idle cost otherwise.       */
+(function(){
+  const DEAD=0.55, REPEAT_FIRST=380, REPEAT_NEXT=110;
+  const SEL='.card,button,input,select,textarea,a[href],[tabindex]:not([tabindex="-1"])';
+  let raf=null, prev=[], held=null, nextNav=0, pads=0;
+
+  const drawerOpen=()=>$("#drawer").classList.contains("open");
+  const popOpen=()=>!$("#settingsPop").hidden;
+
+  function visible(el){
+    if(el.disabled||el.hidden)return false;
+    if(el.offsetParent===null)return false;          // display:none / detached
+    const r=el.getBoundingClientRect();
+    return r.width>2&&r.height>2;
+  }
+  // Navigate within the topmost open surface: settings > drawer > page.
+  function items(){
+    const root=popOpen()?$("#settingsPop"):drawerOpen()?$("#drawer"):document.body;
+    return [...root.querySelectorAll(SEL)].filter(el=>{
+      if(!visible(el))return false;
+      if(root===document.body){
+        // the drawer is translated off-screen (not display:none) when closed,
+        // so its controls must be excluded explicitly
+        if($("#drawer").contains(el))return false;
+        if($("#settingsPop").contains(el))return false;
+      }
+      return true;
+    });
+  }
+  function focus(el){
+    if(!el)return;
+    document.querySelectorAll(".gp-focus").forEach(e=>e.classList.remove("gp-focus"));
+    el.focus({preventScroll:true});
+    el.classList.add("gp-focus");
+    el.scrollIntoView({block:"nearest",inline:"nearest",behavior:"smooth"});
+  }
+  function refocus(delay){
+    setTimeout(()=>{
+      const card=window.current&&document.querySelector(`.card[data-appid="${current.appid}"]`);
+      focus((card&&visible(card))?card:items()[0]);
+    },delay);
+  }
+  function nav(dir){
+    const list=items();
+    if(!list.length)return;
+    const cur=document.activeElement;
+    if(!cur||!list.includes(cur)){focus(list[0]);return}
+    const a=cur.getBoundingClientRect(), ax=a.left+a.width/2, ay=a.top+a.height/2;
+    let best=null, bestScore=Infinity;
+    for(const el of list){
+      if(el===cur)continue;
+      const b=el.getBoundingClientRect();
+      const dx=b.left+b.width/2-ax, dy=b.top+b.height/2-ay;
+      const along = dir==="right"?dx : dir==="left"?-dx : dir==="down"?dy : -dy;
+      const across= (dir==="left"||dir==="right")?Math.abs(dy):Math.abs(dx);
+      if(along<=2)continue;                       // must lie in that direction
+      const score=along+across*2.2;               // strongly prefer same row/col
+      if(score<bestScore){bestScore=score;best=el}
+    }
+    // Left/right at a row edge falls through to DOM order, so a grid wraps
+    // onto the next row instead of dead-ending.
+    if(!best&&(dir==="left"||dir==="right")){
+      const i=list.indexOf(cur);
+      best=list[dir==="right"?i+1:i-1];
+    }
+    if(best)focus(best);
+  }
+  function press(){
+    const el=document.activeElement;
+    if(!el||el===document.body)return;
+    const wasCard=el.classList&&el.classList.contains("card");
+    el.click();
+    if(wasCard)refocus(280);          // follow into the drawer once it's open
+  }
+  function back(){
+    if(popOpen()){$("#settingsBtn").click();refocus(60);return}
+    if(drawerOpen()){closeDrawer();refocus(280)}
+  }
+  function playFocused(){
+    const el=document.activeElement;
+    const card=el&&el.closest&&el.closest(".card");
+    if(card){card.querySelector("[data-play],[data-install]")?.click();return}
+    if(drawerOpen())$("#dPlay")?.click();
+  }
+  function cycleTab(d){
+    if(!drawerOpen())return;
+    const tabs=[...document.querySelectorAll(".tab")].filter(visible);
+    if(!tabs.length)return;
+    const i=tabs.findIndex(t=>t.classList.contains("active"));
+    const t=tabs[((i<0?0:i)+d+tabs.length)%tabs.length];
+    if(t)switchTab(t.dataset.tab);
+  }
+
+  function loop(){
+    const gp=[...(navigator.getGamepads?navigator.getGamepads():[])].find(g=>g&&g.connected);
+    if(gp){
+      const now=performance.now();
+      const b=gp.buttons.map(x=>x.pressed);
+      const ax=gp.axes[0]||0, ay=gp.axes[1]||0;
+      const dir = (b[12]||ay<-DEAD)?"up" : (b[13]||ay>DEAD)?"down"
+                : (b[14]||ax<-DEAD)?"left" : (b[15]||ax>DEAD)?"right" : null;
+      if(dir){
+        if(dir!==held){held=dir;nextNav=now+REPEAT_FIRST;nav(dir)}
+        else if(now>=nextNav){nextNav=now+REPEAT_NEXT;nav(dir)}
+      }else held=null;
+      const hit=i=>b[i]&&!prev[i];
+      if(hit(0))press();
+      if(hit(1))back();
+      if(hit(2))playFocused();
+      if(hit(3))focus($("#search"));
+      if(hit(4))cycleTab(-1);
+      if(hit(5))cycleTab(1);
+      if(hit(9))$("#settingsBtn")?.click();
+      prev=b;
+    }
+    raf=requestAnimationFrame(loop);
+  }
+
+  window.addEventListener("gamepadconnected",()=>{
+    pads++;
+    document.body.classList.add("gp-active");
+    $("#gpHint").classList.add("show");
+    prev=[];                                   // don't fire on a held button
+    if(!raf)raf=requestAnimationFrame(loop);
+    if(!document.activeElement||document.activeElement===document.body)focus(items()[0]);
+    toast("Controller connected");
+  });
+  window.addEventListener("gamepaddisconnected",()=>{
+    if(--pads>0)return;
+    pads=0;
+    document.body.classList.remove("gp-active");
+    $("#gpHint").classList.remove("show");
+    if(raf){cancelAnimationFrame(raf);raf=null}
+    document.querySelectorAll(".gp-focus").forEach(e=>e.classList.remove("gp-focus"));
+  });
+  // Mouse/keyboard use clears the pad ring so the two don't fight.
+  document.addEventListener("pointerdown",()=>
+    document.querySelectorAll(".gp-focus").forEach(e=>e.classList.remove("gp-focus")));
+})();
 window.addEventListener("error",e=>{
   // resource load failures have no message — the art fallback chain handles those.
   // Errors from browser extensions (plasma-integration etc.) carry a foreign
@@ -850,17 +1003,9 @@ $("#importBtn").addEventListener("click",async()=>{
 async function loadCache(appid){
   try{
     const d=await api(`/api/game/${appid}/cache`);
-    statusById[appid]={...statusById[appid],cache:d.caches.length>0,compiled:!!(d.status&&d.status.compiled)};
+    statusById[appid]={...statusById[appid],cache:d.caches.length>0};
     renderGrid($("#search").value);
-    const st=d.status||{};
-    const banner=st.compiled&&st.outdated
-      ?`<div class="item"><div class="top"><b>Compiled — recompile recommended</b><span class="chip a">new pipeline data since compile</span></div>
-         <div class="path">Steam collected new shader pipelines since your last compile. The compiled status is kept; run precompile to cover the new ones.</div></div>`
-      :st.compiled
-      ?`<div class="item"><div class="top"><b>Shaders compiled</b><span class="chip v">driver ${esc(st.driver||"?")}</span></div>
-         <div class="path">Compiled ${st.compiled_at?new Date(st.compiled_at*1000).toLocaleString():""} — status persists across restarts and resets automatically if the pipeline files or driver change.</div></div>`
-      :(st.stale_reason?`<div class="item"><div class="top"><b>Not compiled</b><span class="chip m">${esc(st.stale_reason)}</span></div></div>`:"");
-    $("#cacheList").innerHTML=banner+(d.caches.length?d.caches.map(c=>`
+    $("#cacheList").innerHTML=(d.caches.length?d.caches.map(c=>`
       <div class="item">
         <div class="top"><b>${fmtMB(c.size_bytes)}</b>
           <span class="chip a">${c.files} files</span>
@@ -872,7 +1017,7 @@ async function loadCache(appid){
 }
 $("#clearCacheBtn").addEventListener("click",async()=>{
   if(!current)return;
-  if(!confirm(`Clear the compiled shader cache for ${current.name}? The fozpipelinesv6 recordings are kept, so you can precompile again immediately.`))return;
+  if(!confirm(`Clear the compiled shader cache for ${current.name}? The fozpipelinesv6 recordings are kept, so Steam can rebuild from them.`))return;
   try{
     const r=await post(`/api/game/${current.appid}/cache/clear`,{keep_recordings:true});
     toast(r.cleared.length?`Compiled cache cleared (${r.kept_recordings} recordings kept)`:"Nothing to clear");
@@ -881,7 +1026,7 @@ $("#clearCacheBtn").addEventListener("click",async()=>{
 });
 $("#clearAllBtn").addEventListener("click",async()=>{
   if(!current)return;
-  if(!confirm(`Delete ALL shader cache data for ${current.name}, including the foz recordings? Steam will need to re-collect them before you can precompile.`))return;
+  if(!confirm(`Delete ALL shader cache data for ${current.name}, including the foz recordings? Steam will re-download/collect them next time.`))return;
   try{
     const r=await post(`/api/game/${current.appid}/cache/clear`,{keep_recordings:false});
     toast(r.cleared.length?"Everything deleted":"Nothing to delete");
@@ -910,37 +1055,6 @@ $("#advToggle")?.addEventListener("click",()=>{
   const p=$("#advPanel");const open=p.style.display!=="none";
   p.style.display=open?"none":"block";
   $("#advToggle").textContent=(open?"▸":"▾")+" Advanced";
-});
-
-$("#fixShadersBtn")?.addEventListener("click",async()=>{
-  if(!current)return;
-  const btn=$("#fixShadersBtn");btn.disabled=true;
-  $("#fozDetail").textContent="Compiling shaders…";
-  try{
-    const {task}=await post(`/api/game/${current.appid}/cache/precompile`,
-      {device_index:0});
-    trackTask(task,"#fozBar",async()=>{
-      $("#fozDetail").textContent="Shaders compiled. Turning off Steam's pass…";
-      const r=await disableSteamBackgroundShaders();
-      if(r.ok && r.changed>0)
-        $("#fozDetail").textContent="✓ Done — shaders compiled and Steam's pass turned off. Launch the game; no more processing screen.";
-      else if(r.reason==="defaults")
-        $("#fozDetail").textContent="✓ Shaders compiled. To stop Steam redoing them: Steam → Settings → Shader Pre-Caching → untick background processing (once), then click this again.";
-      else
-        $("#fozDetail").textContent="✓ Shaders compiled. (Couldn't change Steam's setting automatically — see Advanced.)";
-      loadCache(current.appid);loadSteamShader();
-      btn.disabled=false;
-    },"#fozDetail");
-  }catch(e){toast(e.message,true);btn.disabled=false;$("#fozDetail").textContent=""}
-});
-
-$("#precompileBtn").addEventListener("click",async()=>{
-  if(!current)return;
-  try{
-    const {task}=await post(`/api/game/${current.appid}/cache/precompile`,
-      {device_index:+$("#devIdx").value});
-    trackTask(task,"#fozBar",()=>{toast("Precompile finished");loadCache(current.appid)},"#fozDetail");
-  }catch(e){toast(e.message,true)}
 });
 
 function trackTask(id,barSel,onDone,detailSel){
@@ -1047,7 +1161,11 @@ function paintProgress(list){
   let changed=false, active=false;
   for(const g of list){
     const prev=statusById[g.appid]||{};
-    const installing=g.installed&&g.fully_installed===false;
+    // Don't require g.installed: Steam writes the manifest (and we start
+    // reporting progress) before it creates the game directory, so gating on
+    // the directory meant the card only flipped to "installing" after a manual
+    // browser refresh.
+    const installing=g.fully_installed===false;
     if(installing)active=true;
     // finished while we watched -> full refresh so rails/art/size update
     if(prev.installing&&!installing)changed=true;

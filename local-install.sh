@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  Proton Command Center 1.5.0 - LOCAL TEST INSTALLER
+#  Proton Command Center - LOCAL TEST INSTALLER
 #  Removes ALL previous backends (pacman package, user service, orphans,
 #  stale port holders) before installing, so nothing old can keep serving.
 # ============================================================================
@@ -13,6 +13,11 @@ BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$HOME/.local/share/applications"
 SVC_DIR="$HOME/.config/systemd/user"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Single source of truth: read it from pcc.py rather than hardcoding, which
+# previously shipped a stale "1.5.0" into the banner AND the systemd unit
+# Description, so journalctl reported the wrong version forever.
+VER="$(grep -m1 -o 'VERSION = "[0-9][0-9.]*"' "$SRC/pcc.py" | grep -o '[0-9][0-9.]*' || true)"
+[ -n "$VER" ] || { printf '\033[31mfail\033[0m  cannot read VERSION from %s/pcc.py\n' "$SRC"; exit 1; }
 
 g(){ printf '\033[32m  ok\033[0m  %s\n' "$1"; }
 y(){ printf '\033[33mwarn\033[0m  %s\n' "$1"; }
@@ -25,7 +30,7 @@ case "$APP_DIR" in
   *) r "unsafe app path: $APP_DIR"; exit 1 ;;
 esac
 
-echo "== Proton Command Center 1.5.0 - local test install =="
+echo "== Proton Command Center $VER - local test install =="
 echo
 
 # --- 1. tear down EVERY previous backend -------------------------------------
@@ -73,9 +78,9 @@ if [ -d "$APP_DIR" ]; then
     fi
 fi
 
-# --- 3. install 1.5.0 --------------------------------------------------------
+# --- 3. install --------------------------------------------------------
 echo
-echo ":: installing 1.5.0"
+echo ":: installing $VER"
 mkdir -p "$APP_DIR" "$BIN_DIR" "$DESKTOP_DIR" "$SVC_DIR"
 install -Dm644 "$SRC/pcc.py"     "$APP_DIR/pcc.py"
 install -Dm644 "$SRC/index.html" "$APP_DIR/index.html"
@@ -108,7 +113,7 @@ g "launcher -> $BIN_DIR/$APP_NAME"
 
 cat > "$SVC_DIR/$APP_NAME.service" << EOF
 [Unit]
-Description=Proton Command Center backend (local 1.5.0)
+Description=Proton Command Center backend (local $VER)
 After=network.target
 
 [Service]
@@ -137,7 +142,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now "$APP_NAME.service"
 g "service enabled & started"
 
-# --- 4. verify the RUNNING backend is actually 1.5.0 -------------------------
+# --- 4. verify the RUNNING backend is actually $VER -------------------------
 echo
 echo ":: verifying"
 FILE_VER=$(grep -o 'VERSION = "[0-9.]*"' "$APP_DIR/pcc.py" | grep -o '[0-9][0-9.]*')

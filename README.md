@@ -2,8 +2,9 @@
 
 A local web app for managing your Steam library on Linux without digging
 through Steam's UI: per-game launch options, Proton version selection, DLSS
-DLL management with one-click updates, Fossilize shader precompilation,
-MangoHud overlay configuration and before/after benchmarks, a ProtonDB
+DLL management with one-click updates, shader cache management,
+MangoHud overlay configuration and before/after benchmarks, full controller
+navigation, a ProtonDB
 rating check, and a full owned-library view with one-click installs. Built
 for Arch-based distros (CachyOS, EndeavourOS, vanilla Arch) with an NVIDIA
 slant, though nothing Arch-specific is required beyond the install scripts.
@@ -16,9 +17,7 @@ library only — no dependencies to install.
 - Python 3 (`sudo pacman -S python`) — the only hard dependency
 - Steam, installed and logged in at least once
 - Optional: `mangohud` (overlay + benchmarks), an NVIDIA driver (DLSS
-  features, driver-aware compile tracking), `fossilize_replay` for shader
-  precompilation (ships with Steam's Linux runtime once you've launched any
-  Proton game)
+  features, shader cache management)
 
 ## Install
 
@@ -82,12 +81,18 @@ backed up before any swap; Restore is one click. Restore originals before
 playing anti-cheat titles that enforce file integrity.
 
 **Shader cache tab** — a global toggle writes the NVIDIA shader-disk-cache
-environment variables to `/etc/environment` (persists compiled shaders
-across runs). The one-click button precompiles this game's shaders with
-Fossilize and turns off Steam's own "Processing Vulkan shaders" pass so it
-doesn't redo the work at launch. Granular controls (precompile only, clear
-cache, delete everything, GPU device index) are under **Advanced**. Compiled
-status persists and only resets when your NVIDIA driver changes.
+environment variables to `/etc/environment`, consolidating the driver's
+compiled shaders into one capped location that survives cleanup (this is the
+part that meaningfully reduces in-game shader stutter). Shows cache sizes per
+game, with clear-cache and delete-everything actions under **Advanced**.
+
+Command Center does **not** try to pre-empt Steam's own "Processing Vulkan
+shaders" pass. Steam replays its `.foz` pipeline caches into its own database
+and gates on its own ledger, so nothing outside Steam can convince it to skip
+that work. If the processing screen bothers you, the real switch is Steam →
+Settings → Downloads → Shader Pre-Caching → untick *Allow background
+processing of Vulkan shaders* — the trade-off being that shaders then compile
+during play, causing brief first-encounter stutter.
 
 **System & MangoHud panel** (🖥 button) — detects and names your CPU and
 GPU(s), reads VRAM, and generates a MangoHud config in a compact horizontal
@@ -96,9 +101,28 @@ GPU on hybrid laptops). Enabling the MangoHud launch toggle writes this
 config automatically on first use. Presets range from a minimal readout to a
 full benchmark overlay.
 
-**Benchmark tab** — save the benchmark launch options, play, precompile,
-play again. Logs are split at your compile time and compared on avg FPS, 1%
-and 0.1% lows, and stutter count, with frametime graphs.
+**Benchmark tab** — save the benchmark launch options, play, make a change,
+play again. Logs are split at the marked time and compared on avg FPS, 1% and
+0.1% lows, and stutter count, with frametime graphs.
+
+**Controller navigation** — plug in a pad (Xbox, DualSense, Steam Deck) and
+the whole UI becomes navigable from the couch. A hint bar appears along the
+bottom with the mapping:
+
+| Input | Action |
+|---|---|
+| D-pad / left stick | Move between cards and controls |
+| **A** | Select / activate |
+| **B** | Back — closes the drawer or settings |
+| **X** | Play (or Install) the focused game |
+| **LB / RB** | Cycle the drawer's tabs |
+| **Start** | Open settings |
+
+Navigation is spatial, so pressing down from a card lands on the card directly
+below rather than wandering diagonally; left/right at the end of a row wraps to
+the next one. The pad drives real DOM focus, so keyboard navigation improves
+alongside it. Nothing runs until a pad is connected. Text fields still need a
+keyboard — in Game Mode, Steam's on-screen keyboard (**Steam + X**) covers it.
 
 **🎮 Game Mode button** *(CachyOS only)* — appears in the header only on
 CachyOS Handheld / systems with `gamescope-session-cachyos` installed.
