@@ -460,6 +460,9 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
         launch, turn off <b>Allow background processing of Vulkan shaders</b> in
         Steam → Settings → Downloads → Shader Pre-Caching. (Shaders then compile
         during play instead, which can cause brief first-encounter stutter.)</p>
+
+      <h3 style="margin-top:18px">Shader processing speed</h3>
+      <div id="threadsBox"><p class="note">Checking…</p></div>
     </div>
     <div class="section">
       <button class="btn" id="advToggle" style="font-size:12px">▸ Advanced</button>
@@ -517,7 +520,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 
 <script>
 "use strict";
-const FRONTEND_VERSION="1.11.3";
+const FRONTEND_VERSION="1.12.0";
 const $=s=>document.querySelector(s);
 const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
 const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
@@ -1183,7 +1186,51 @@ $("#importBtn").addEventListener("click",async()=>{
   }catch(e){toast(e.message,true)}
 });
 
+/* ---------- Steam shader processing threads ----------
+   Lives in steam_dev.cfg, which Steam never creates and exposes nowhere in its
+   UI. Read once at client startup, so changes need a full Steam restart.     */
+async function loadShaderThreads(){
+  const box=$("#threadsBox");
+  if(!box)return;
+  try{
+    const d=await api("/api/steam/shader_threads");
+    const set=d.current!=null;
+    const optimal=set&&d.current===d.recommended;
+    box.innerHTML=`
+      <div class="item"><div class="top">
+        <b>${set?`Using ${d.current} of ${d.cores} threads`:`Steam default (${d.cores} threads available)`}</b>
+        <span class="chip ${optimal?"v":"m"}">${optimal?"optimal":set?"custom":"not set"}</span>
+      </div>
+      <div class="path">${set
+        ? `Set in steam_dev.cfg. Steam must be fully restarted for changes to apply.`
+        : `Steam uses only a fraction of your cores by default, which is why the
+           "Processing Vulkan shaders" pass can crawl. Nothing in Steam's UI
+           changes this — the override lives in a file Steam doesn't create.`}</div></div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="threadsFast">Use ${d.recommended} threads (all but ${d.reserve})</button>
+        ${set?`<button class="btn" id="threadsReset">Back to Steam default</button>`:""}
+      </div>
+      <p class="note">Leaves ${d.reserve} cores free so the desktop stays usable while it runs.</p>`;
+    $("#threadsFast").addEventListener("click",async()=>{
+      try{
+        const r=await post("/api/steam/shader_threads",{threads:d.recommended});
+        toast(`Set to ${r.threads} threads — restart Steam to apply`);
+        loadShaderThreads();
+      }catch(e){toast(e.message||"Failed",true)}
+    });
+    $("#threadsReset")?.addEventListener("click",async()=>{
+      if(!await pccConfirm("Remove the thread override?\n\nSteam goes back to using a fraction of your cores, and its shader pass will be slower."))return;
+      try{
+        await post("/api/steam/shader_threads",{threads:null});
+        toast("Override removed — restart Steam to apply");
+        loadShaderThreads();
+      }catch(e){toast(e.message||"Failed",true)}
+    });
+  }catch(e){box.innerHTML=`<p class="note">Couldn't read Steam's config.</p>`}
+}
+
 async function loadCache(appid){
+  loadShaderThreads();
   try{
     const d=await api(`/api/game/${appid}/cache`);
     statusById[appid]={...statusById[appid],cache:d.caches.length>0};

@@ -25,7 +25,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.11.3"
+VERSION = "1.12.0"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -2068,6 +2068,92 @@ def _walk_vdf(node, prefix=()):
             yield prefix + (k,), v
 
 
+# --------------------------------------------------------------------------
+# Steam's shader background-processing thread count
+# --------------------------------------------------------------------------
+# Steam defaults to a fraction of your logical cores for the "Processing Vulkan
+# shaders" pass, which is why it can crawl on an otherwise idle machine. The
+# override lives in steam_dev.cfg as a plain `key value` line -- NOT in the VDF
+# configs, and NOT in any Steam UI.
+#
+# Two things that make this easy to get wrong:
+#   1. Steam never creates steam_dev.cfg. It does not exist on a stock install,
+#      so this has to write the file, not just edit it.
+#   2. It's read once at client startup, so Steam needs a full restart -- not
+#      just a settings reload -- for a change to apply.
+SHADER_THREADS_KEY = "unShaderBackgroundProcessingThreads"
+# Leave this many logical cores free so the desktop stays responsive while the
+# pass runs. Steam pinned to every core makes the machine miserable to use.
+SHADER_THREADS_RESERVE = 2
+
+
+def logical_cores():
+    """Logical CPUs actually usable by this process.
+    sched_getaffinity respects taskset/cgroup limits; cpu_count doesn't."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 1
+
+
+def recommended_shader_threads():
+    return max(1, logical_cores() - SHADER_THREADS_RESERVE)
+
+
+def steam_dev_cfg(root):
+    return Path(root) / "steam_dev.cfg"
+
+
+def get_shader_threads(root):
+    """Current override, or None if unset (i.e. Steam's own default applies)."""
+    cfg = steam_dev_cfg(root)
+    if not cfg.is_file():
+        return None
+    for line in cfg.read_text(errors="replace").splitlines():
+        parts = line.strip().split()
+        if len(parts) == 2 and parts[0].lower() == SHADER_THREADS_KEY.lower():
+            try:
+                return int(parts[1])
+            except ValueError:
+                return None
+    return None
+
+
+def set_shader_threads(root, threads):
+    """Write the override, creating steam_dev.cfg if absent and preserving any
+    other lines already in it. Pass threads=None to remove the override."""
+    cores = logical_cores()
+    if threads is not None:
+        threads = int(threads)
+        if not 1 <= threads <= cores:
+            raise RuntimeError(f"threads must be between 1 and {cores}")
+    cfg = steam_dev_cfg(root)
+    lines = (cfg.read_text(errors="replace").splitlines()
+             if cfg.is_file() else [])
+    kept = [l for l in lines
+            if l.strip().split()[:1] != [SHADER_THREADS_KEY]
+            and not l.strip().lower().startswith(SHADER_THREADS_KEY.lower())]
+    if threads is not None:
+        kept.append(f"{SHADER_THREADS_KEY} {threads}")
+    body = "\n".join(kept).strip()
+    if body:
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(body + "\n")
+    elif cfg.is_file():
+        cfg.unlink()          # nothing left worth keeping
+    return {"threads": threads, "cores": cores, "file": str(cfg),
+            "restart_required": True}
+
+
+def shader_threads_status(root):
+    return {"current": get_shader_threads(root),
+            "cores": logical_cores(),
+            "recommended": recommended_shader_threads(),
+            "reserve": SHADER_THREADS_RESERVE,
+            "file": str(steam_dev_cfg(root)),
+            "exists": steam_dev_cfg(root).is_file()}
+
+
 def steam_shader_settings(root):
     """Find every shader-related key Steam has written, across its configs.
     Steam only persists these once you've touched them, so an empty result
@@ -2733,6 +2819,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"games": owned_games(root)})
             elif self.path == "/api/steam/shader_settings":
                 self._json(steam_shader_settings(root))
+            elif self.path == "/api/steam/shader_threads":
+                self._json(shader_threads_status(root))
             elif self.path == "/api/hardware":
                 self._json(detect_hardware())
             elif self.path == "/api/game_mode":
@@ -2867,6 +2955,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(set_steam_shader_setting(
                     root, body["file"], body["path"], body["value"],
                     close_steam=bool(body.get("close_steam"))))
+            elif self.path == "/api/steam/shader_threads":
+                # threads omitted -> use the recommended value; null -> unset
+                t = (body["threads"] if "threads" in body
+                     else recommended_shader_threads())
+                self._json(set_shader_threads(root, t))
             elif self.path == "/api/mangohud/apply":
                 self._json(apply_mangohud_config(
                     body.get("preset", "standard"),

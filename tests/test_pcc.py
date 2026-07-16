@@ -857,6 +857,41 @@ class PCCTests(unittest.TestCase):
             self.assertNotIn("sha256sums = SKIP", s.read_text(),
                              ".SRCINFO ships a SKIP checksum")
 
+    def test_shader_threads_creates_missing_dev_cfg(self):
+        """Steam never ships steam_dev.cfg -- it does not exist on a stock
+        install -- so the override has to CREATE the file, not just edit it.
+        Regression: the existing VDF writer only updates keys in files that
+        already exist, so it would have silently done nothing here."""
+        root = Path(self.tmp.name) / "steamroot"
+        root.mkdir()
+        real = pcc.logical_cores
+        pcc.logical_cores = lambda: 16
+        try:
+            st = pcc.shader_threads_status(root)
+            self.assertFalse(st["exists"])
+            self.assertIsNone(st["current"])
+            self.assertEqual(st["recommended"], 14)      # 16 - 2 reserved
+
+            pcc.set_shader_threads(root, st["recommended"])
+            cfg = root / "steam_dev.cfg"
+            self.assertTrue(cfg.is_file(), "must create steam_dev.cfg")
+            self.assertEqual(pcc.get_shader_threads(root), 14)
+
+            # must not clobber unrelated lines, nor duplicate the key
+            cfg.write_text("unSomethingElse 1\n"
+                           "unShaderBackgroundProcessingThreads 4\n")
+            pcc.set_shader_threads(root, 9)
+            txt = cfg.read_text()
+            self.assertIn("unSomethingElse 1", txt)
+            self.assertEqual(txt.count("unShaderBackgroundProcessingThreads"), 1)
+            self.assertEqual(pcc.get_shader_threads(root), 9)
+
+            for bad in (0, 17, -1):
+                with self.assertRaises(RuntimeError):
+                    pcc.set_shader_threads(root, bad)
+        finally:
+            pcc.logical_cores = real
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -80,7 +80,14 @@ appears when a game's DLL is behind your library's newest. Originals are
 backed up before any swap; Restore is one click. Restore originals before
 playing anti-cheat titles that enforce file integrity.
 
-**Shader cache tab** — a global toggle writes the NVIDIA shader-disk-cache
+**Shader cache tab** — sets how many CPU threads Steam uses for its
+"Processing Vulkan shaders" pass. Steam only uses a fraction of your cores by
+default, which is why that screen can crawl on an otherwise idle machine; the
+override lives in `steam_dev.cfg`, a file Steam never creates and exposes
+nowhere in its UI. One click sets it to every core but two (leaving headroom so
+the desktop stays usable), and Steam needs a full restart to pick it up.
+
+A global toggle writes the NVIDIA shader-disk-cache
 environment variables to `/etc/environment`, consolidating the driver's
 compiled shaders into one capped location that survives cleanup (this is the
 part that meaningfully reduces in-game shader stutter). Shows cache sizes per
