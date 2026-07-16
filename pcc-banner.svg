@@ -42,7 +42,7 @@
     <text x="78" y="222" font-size="34" font-weight="700" fill="#f5a623" letter-spacing="6">COMMAND CENTER</text>
 
     <text x="80" y="266" font-size="16.5" fill="#9aa5b1">Your Steam library, tuned from one place —</text>
-    <text x="80" y="290" font-size="16.5" fill="#9aa5b1">launch options · Proton picks · DLSS swaps · shader precompile · benchmarks</text>
+    <text x="80" y="290" font-size="16.5" fill="#9aa5b1">launch options · Proton picks · DLSS swaps · controller nav · benchmarks</text>
 
     <!-- install chip -->
     <rect x="78" y="318" width="378" height="42" rx="9" fill="#12171d" stroke="#232c35"/>

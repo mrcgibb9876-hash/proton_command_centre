@@ -837,6 +837,26 @@ class PCCTests(unittest.TestCase):
             pcc.subprocess.run, pcc.shutil.which = real_run, real_which
             pcc.session_env = real_senv
 
+    def test_pkgbuild_never_ships_skip_checksum(self):
+        """Regression: the PKGBUILD template carried sha256sums=('SKIP'), which
+        disables integrity checking for everyone who installs. It fails SILENTLY
+        — makepkg prints 'Skipped' and builds happily — so a forgotten
+        updpkgsums nearly published an unverified package. The placeholder is
+        now a deliberately wrong hash, which fails loudly instead."""
+        root = Path(__file__).resolve().parent.parent
+        for rel in ("PKGBUILD", "aur/proton-command-center/PKGBUILD"):
+            p = root / rel
+            if not p.exists():
+                continue
+            body = "\n".join(l for l in p.read_text().splitlines()
+                              if not l.lstrip().startswith("#"))
+            self.assertNotIn("SKIP", body,
+                             f"{rel} ships a SKIP checksum - run updpkgsums")
+        s = root / "aur/proton-command-center/.SRCINFO"
+        if s.exists():
+            self.assertNotIn("sha256sums = SKIP", s.read_text(),
+                             ".SRCINFO ships a SKIP checksum")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

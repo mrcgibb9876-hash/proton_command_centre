@@ -25,7 +25,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.11.2"
+VERSION = "1.11.3"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -1411,15 +1411,15 @@ DEFAULT_TUNING_RULES = {
     "engines": {
         "unreal4": {
             "env": {},
-            "notes": ["UE4: PSO stutter is the usual hitching cause — precompile "
-                      "shaders in the Cache tab before judging performance",
+            "notes": ["UE4: PSO stutter is the usual hitching cause — let Steam "
+                      "finish its shader pass before judging performance",
                       "If hitching persists, cap FPS a few frames below refresh "
                       "(frame pacing) and test with Frame Generation OFF"],
         },
         "unreal5": {
             "env": {},
-            "notes": ["UE5: run shader precompile first — biggest single fix "
-                      "for periodic hitching",
+            "notes": ["UE5: PSO/traversal stutter is common — let Steam finish "
+                      "its shader pass, then judge frame pacing",
                       "Frame Generation can worsen UE5 frame pacing — A/B test "
                       "with the Benchmark tab",
                       "If traversal stutter remains, an fps cap (DXVK_FRAME_RATE) "
@@ -1446,7 +1446,7 @@ DEFAULT_TUNING_RULES = {
          "env": {},
          "vram_cap": True,
          "fps_cap_hint": True,
-         "notes": ["Rhythmic hitching profile: precompile shaders, test with "
+         "notes": ["Rhythmic hitching profile: let shaders warm, test with "
                    "FG off, VRAM cap applied",
                    "If hitching survives all three, capture a Benchmark run and "
                    "check stutter % before/after each change"]},
@@ -1646,7 +1646,6 @@ def auto_tune(root, appid):
         "reasons": reasons + det["evidence"],
         "notes": notes,
         "vram_mb": vram,
-        "precompile_recommended": (det["engine"] or "").startswith("unreal"),
     }
 
 
@@ -2033,7 +2032,7 @@ def cache_info(root, appid):
 
 def clear_cache(root, appid, keep_recordings=True):
     """Default clears COMPILED artifacts but preserves fozpipelinesv6/
-    recordings — they're the source data for precompiling and costly to
+    recordings — Steam's source data for its shader pass, costly to
     regenerate. keep_recordings=False deletes everything."""
     cleared, kept = [], 0
     for entry in cache_info(root, appid):

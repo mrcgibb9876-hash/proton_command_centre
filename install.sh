@@ -58,15 +58,6 @@ else
     c_warn "steam not found in PATH — install it (sudo pacman -S steam) or the app will find no games"
 fi
 
-if command -v fossilize_replay >/dev/null; then
-    c_ok "fossilize_replay (system)"
-elif ls "$DATA_HOME"/Steam/steamapps/common/SteamLinuxRuntime*/*/fossilize_replay >/dev/null 2>&1 \
-  || ls "$HOME"/.steam/steam/steamapps/common/SteamLinuxRuntime*/*/fossilize_replay >/dev/null 2>&1; then
-    c_ok "fossilize_replay (Steam runtime — auto-detected at runtime)"
-else
-    c_warn "fossilize_replay not found — shader precompile needs it."
-    c_warn "It ships with Steam's Linux runtime (launch any Proton game once), or: AUR 'fossilize'"
-fi
 
 if command -v nvidia-smi >/dev/null || [ -r /sys/module/nvidia/version ]; then
     c_ok "NVIDIA driver detected (compile tracking will use driver-version invalidation)"
