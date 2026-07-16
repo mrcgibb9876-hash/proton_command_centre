@@ -105,24 +105,43 @@ full benchmark overlay.
 play again. Logs are split at the marked time and compared on avg FPS, 1% and
 0.1% lows, and stutter count, with frametime graphs.
 
-**Controller navigation** — plug in a pad (Xbox, DualSense, Steam Deck) and
-the whole UI becomes navigable from the couch. A hint bar appears along the
-bottom with the mapping:
+**Controller navigation** — plug in a pad (Xbox, DualSense, Steam Deck) and the
+whole UI becomes navigable from the couch. A hint bar appears along the bottom
+with the mapping:
 
 | Input | Action |
 |---|---|
-| D-pad / left stick | Move between cards and controls |
+| **D-pad / left stick** | Move between cards and controls |
 | **A** | Select / activate |
 | **B** | Back — closes the drawer or settings |
 | **X** | Play (or Install) the focused game |
+| **Y** | Jump to search |
 | **LB / RB** | Cycle the drawer's tabs |
-| **Start** | Open settings |
+| **Start** | Settings |
+| **Select / Back** | Toggle fullscreen |
 
 Navigation is spatial, so pressing down from a card lands on the card directly
 below rather than wandering diagonally; left/right at the end of a row wraps to
-the next one. The pad drives real DOM focus, so keyboard navigation improves
-alongside it. Nothing runs until a pad is connected. Text fields still need a
-keyboard — in Game Mode, Steam's on-screen keyboard (**Steam + X**) covers it.
+the next one. A game card is a single stop — its Play/Install button isn't a
+separate target, and the focused card reveals its ▶ so you can see what **X**
+will act on. The pad drives real DOM focus, so keyboard navigation improves
+alongside it, and nothing runs until a pad is connected. Text fields still need
+a keyboard — in Game Mode, Steam's on-screen keyboard (**Steam + X**) covers it.
+
+Confirmation prompts are drawn in-page rather than using the browser's native
+`confirm()`, because a native dialog halts JavaScript — which freezes the pad
+polling loop and leaves the prompt literally unanswerable from a controller.
+Installing a game asks nothing at all: Steam opens its own install dialog, so a
+second confirmation was only ever confirming that you'd like to be asked.
+
+**Fullscreen** — the ⛶ header button (or **F11**, or **Select** on a pad)
+toggles fullscreen, and **Esc** always leaves it. *Settings → Display → Open
+fullscreen* makes it automatic. One caveat worth knowing: browsers forbid a page
+from going fullscreen on load without a user gesture, so it fires on your first
+click or controller button rather than the instant the page appears. That's a
+browser security rule, not a setting. Command Center deliberately doesn't launch
+your browser in `--kiosk` mode — that traps you (F11 won't exit, only Alt+F4)
+and silently does nothing if a browser window is already open.
 
 **🎮 Game Mode button** *(CachyOS only)* — appears in the header only on
 CachyOS Handheld / systems with `gamescope-session-cachyos` installed.
