@@ -34,6 +34,18 @@ body.gp-active .card.gp-focus{outline-offset:4px;transform:translateY(-2px)}
 /* No hover on a pad, so the focused card reveals its Play button the way
    :hover does — otherwise there's no hint of what X will act on. */
 body.gp-active .card.gp-focus .playbtn{opacity:1}
+/* The settings popover is position:fixed with a growing list of GE-Proton
+   releases inside. Without a height cap it ran off the bottom of the screen,
+   and because it didn't scroll itself the wheel scrolled the page behind it -
+   so the list was unreachable. Cap to the viewport and give it its own
+   scroller; overscroll-behavior stops the scroll chaining to the page. */
+#settingsPop{position:fixed;top:62px;right:22px;z-index:45;background:var(--panel2);
+  border:1px solid var(--line);border-radius:var(--radius);padding:16px;
+  width:min(360px,calc(100% - 44px));
+  max-height:calc(100vh - 84px);overflow-y:auto;overscroll-behavior:contain;
+  box-shadow:0 20px 50px #000b}
+#settingsPop::-webkit-scrollbar{width:10px}
+#settingsPop::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
 /* NVIDIA cache header - the headline number for this tab */
 #nvCache .big{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
 #nvCache .big b{font-size:30px;font-family:"Chakra Petch",sans-serif;color:var(--ink)}
@@ -237,8 +249,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
   <button class="btn" id="settingsBtn" aria-label="Settings" title="Settings">⚙</button>
   <div id="steamState">checking…</div>
 </header>
-<div id="settingsPop" hidden style="position:fixed;top:62px;right:22px;z-index:45;background:var(--panel2);
-  border:1px solid var(--line);border-radius:var(--radius);padding:16px;width:min(360px,calc(100% - 44px))">
+<div id="settingsPop" hidden>
   <h3 style="font-size:12.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px">SteamGridDB art</h3>
   <p class="note" style="margin:0 0 10px">Missing artwork is fetched from SteamGridDB when you add a free API key
     (steamgriddb.com → Profile → Preferences → API). Steam's own art needs no key.</p>
@@ -456,6 +467,11 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
         <div><b>NVIDIA shader disk cache</b><small>__GL_SHADER_DISK_CACHE (+ path, 10 GiB, no auto-purge) written to /etc/environment for all games. Persists compiled shaders across runs. DXVK's own cache vars are obsolete on modern Proton, so they're not set.</small></div>
         <label class="switch"><input type="checkbox" id="shaderEnvToggle"><em></em></label>
       </div>
+      <div class="row" id="cacheSizeRow" style="margin-top:10px;align-items:center;gap:10px">
+        <label class="note" for="cacheSize" style="margin:0">Cache limit</label>
+        <select id="cacheSize" style="flex:0 0 auto"></select>
+        <span class="note" id="cacheSizeNote" style="margin:0"></span>
+      </div>
       <p class="note" id="shaderEnvNote">Applies to every game. Needs your password (writes a system file) and a re-login to take effect.</p>
     </div>
     <div class="section">
@@ -518,7 +534,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 
 <script>
 "use strict";
-const FRONTEND_VERSION="1.14.4";
+const FRONTEND_VERSION="1.15.0";
 const $=s=>document.querySelector(s);
 const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
 const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
@@ -1572,7 +1588,28 @@ async function loadShaderEnv(){
     const d=await api("/api/env/shaders");
     const t=$("#shaderEnvToggle");if(t)t.checked=d.enabled;
     renderNvCache(d);
+    renderCacheSizes(d);
   }catch(e){/* /etc/environment unreadable — leave unchecked */}
+}
+function renderCacheSizes(d){
+  const sel=$("#cacheSize");
+  if(!sel||!d.sizes)return;
+  const cur=d.cache?d.cache.limit_bytes:null;
+  sel.innerHTML=d.sizes.map(s=>
+    `<option value="${s.bytes}" ${s.bytes===cur?"selected":""}>${s.gb} GB</option>`).join("");
+  // A ceiling, not an allocation - nothing is reserved until shaders build up.
+  $("#cacheSizeNote").textContent=d.enabled?"":"enable the toggle to apply";
+  sel.disabled=!d.enabled;
+  sel.onchange=async()=>{
+    const bytes=parseInt(sel.value,10);
+    $("#shaderEnvNote").textContent="Applying (password prompt)…";
+    try{
+      await post("/api/env/shaders",{enable:true,size_bytes:bytes});
+      $("#shaderEnvNote").textContent="✓ Limit set. Log out and back in for it to take effect.";
+      toast(`Cache limit set to ${bytes/1073741824} GB`);
+      loadShaderEnv();
+    }catch(e){toast(e.message||"Failed",true);loadShaderEnv()}
+  };
 }
 function renderNvCache(d){
   const box=$("#nvCache");
@@ -1602,7 +1639,10 @@ $("#shaderEnvToggle")?.addEventListener("change",async e=>{
   const on=e.target.checked;
   $("#shaderEnvNote").textContent="Applying (password prompt)…";
   try{
-    const r=await post("/api/env/shaders",{enable:on});
+    // keep whatever ceiling is selected rather than silently reverting to 10 GB
+    const sizeSel=$("#cacheSize");
+    const size=sizeSel&&sizeSel.value?parseInt(sizeSel.value,10):undefined;
+    const r=await post("/api/env/shaders",on?{enable:true,size_bytes:size}:{enable:false});
     $("#shaderEnvNote").textContent=on
       ? "✓ Enabled globally. Log out and back in for it to take effect."
       : "✓ Removed from /etc/environment. Log out and back in to clear.";

@@ -25,7 +25,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.14.4"
+VERSION = "1.15.0"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -688,6 +688,7 @@ def environment_shader_status() -> dict:
     out = {"enabled": all(present[k] is not None for k in SHADER_ENV_VARS),
            "vars": present}
     out["cache"] = nvidia_cache_info()
+    out["sizes"] = [{"gb": gb, "bytes": b} for gb, b in SHADER_CACHE_SIZES]
     out["steam_cache"] = None      # filled by the route, which knows the root
     # the live ceiling is whatever /etc/environment says, not our default
     cur = present.get("__GL_SHADER_DISK_CACHE_SIZE")
@@ -696,17 +697,39 @@ def environment_shader_status() -> dict:
     return out
 
 
-def set_environment_shaders(enable) -> dict:
+# Ceilings offered in the UI. NVIDIA's own default is 12 GB on recent drivers;
+# these are a cap, not a reservation - nothing is allocated up front.
+SHADER_CACHE_SIZES = [
+    (10, 10 * 1024**3),
+    (30, 30 * 1024**3),
+    (50, 50 * 1024**3),
+    (100, 100 * 1024**3),
+]
+
+
+def set_environment_shaders(enable, size_bytes=None) -> dict:
     """Add or remove the shader-cache env vars in /etc/environment via pkexec.
-    Preserves every other line; only touches our keys."""
-    Path(SHADER_ENV_VARS["__GL_SHADER_DISK_CACHE_PATH"]).mkdir(
+    Preserves every other line; only touches our keys.
+
+    size_bytes overrides the cache ceiling (__GL_SHADER_DISK_CACHE_SIZE). It's
+    a limit rather than an allocation, so a bigger number costs nothing until
+    the shaders actually accumulate.
+    """
+    vars_out = dict(SHADER_ENV_VARS)
+    if size_bytes is not None:
+        n = int(size_bytes)
+        allowed = [b for _, b in SHADER_CACHE_SIZES]
+        if n not in allowed:
+            raise RuntimeError(f"cache size must be one of {allowed}")
+        vars_out["__GL_SHADER_DISK_CACHE_SIZE"] = str(n)
+    Path(vars_out["__GL_SHADER_DISK_CACHE_PATH"]).mkdir(
         parents=True, exist_ok=True)
     txt = read_environment()
     lines = [l for l in txt.splitlines()
              if not any(l.strip().startswith(f"{k}=") for k in SHADER_ENV_VARS)]
     if enable:
         lines.append("# Proton Command Center - shader cache")
-        for k, v in SHADER_ENV_VARS.items():
+        for k, v in vars_out.items():
             lines.append(f'{k}="{v}"' if " " in v or "/" in v else f"{k}={v}")
     else:
         lines = [l for l in lines
@@ -2842,7 +2865,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(set_launch_options(root, m.group(1), body.get("value", ""),
                                               close_steam=bool(body.get("close_steam"))))
             elif self.path == "/api/env/shaders":
-                self._json(set_environment_shaders(bool(body.get("enable"))))
+                self._json(set_environment_shaders(
+                    bool(body.get("enable")), body.get("size_bytes")))
             elif self.path == "/api/game_mode/launch":
                 self._json(launch_game_mode())
             elif self.path == "/api/backup/restore":

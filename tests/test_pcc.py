@@ -957,6 +957,20 @@ class PCCTests(unittest.TestCase):
                 "InstallConfigStore/Software/Valve/Steam/ShaderCacheManager/"
                 "EnableShaderBackgroundProcessing", "8198563848")
 
+    def test_shader_cache_size_is_configurable(self):
+        """The ceiling was hardcoded at 10 GiB. It's a limit, not an
+        allocation, so bigger costs nothing until shaders accumulate - but only
+        the offered sizes may be written, since this goes into /etc/environment
+        as root."""
+        self.assertEqual([gb for gb, _ in pcc.SHADER_CACHE_SIZES],
+                         [10, 30, 50, 100])
+        for _, b in pcc.SHADER_CACHE_SIZES:
+            self.assertEqual(b % (1024 ** 3), 0)
+        # anything not on the list is refused rather than written blindly
+        for bad in (12345, 0, -1, 999 * 1024 ** 3):
+            with self.assertRaises(RuntimeError):
+                pcc.set_environment_shaders(True, bad)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

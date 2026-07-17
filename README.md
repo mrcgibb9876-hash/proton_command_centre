@@ -124,8 +124,9 @@ click sets it to every core but two. Needs a full Steam restart.
 
 **Disk cache.** A global toggle writes NVIDIA's shader-disk-cache variables to
 `/etc/environment`, consolidating compiled shaders somewhere that survives
-cleanup. Needs a re-login: environment variables only reach processes started
-afterwards.
+cleanup, with a 10/30/50/100 GB ceiling. The ceiling is a limit, not a
+reservation - nothing is allocated until shaders accumulate. Needs a re-login:
+environment variables only reach processes started afterwards.
 
 Command Center does **not** try to pre-empt Steam's "Processing Vulkan shaders"
 pass. Steam replays its own pipeline caches and gates on its own ledger, so
