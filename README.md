@@ -54,19 +54,36 @@ CDN-only art and installed games only.
 ## Using it
 
 The grid shows your games with a status rail on each card: launch options
-set, DLSS detected, shader cache present, shaders compiled. Hover for
+set, DLSS detected, shader cache present. Hover for
 **▶ Play** (launches through Steam). Greyed cards are owned but not
 installed — click to install, with live progress on the card. Click an
 installed game to open its panel.
 
-**Launch tab** — pick a compatibility tool (Proton-CachyOS, GE-Proton, and
-official builds are auto-detected), then build the launch string with
+**Launch tab** — pick a compatibility tool (official Proton builds, GE-Proton,
+Proton-CachyOS and anything else in `compatibilitytools.d` are read from disk,
+so only builds you actually have are offered and new releases appear on their
+own), then build the launch string with
 toggles: native Wayland, HDR, MangoHud, game-performance, and Steam Deck
 spoof on/off. Full DLSS controls sit below: Super Resolution modes with
 custom ratio and transformer presets, Frame Generation, Ray Reconstruction,
 and a frame-rate cap. **One Save** writes the Proton version and launch
 string together, closing Steam cleanly first (it would otherwise overwrite
 the change on exit) with a timestamped backup next to `localconfig.vdf`.
+
+**Per-build option validation** — Proton builds don't all understand the same
+environment variables. GE-Proton11-1 reads 29 that Valve's Proton 11.0 has never
+heard of, `PROTON_ENABLE_WAYLAND` and `PROTON_ENABLE_HDR` among them, so a
+launch string that works under GE can be silently inert under Valve's build.
+Command Center scans each installed build's launcher script for the variables it
+actually reads, and greys out any toggle the selected build can't act on,
+telling you which variable is missing.
+
+It only greys out what it can prove. The scan sees what the launcher script
+reads; variables consumed further down the stack are invisible to it -
+`DXVK_NVAPI_VKREFLEX` is read by the dxvk-nvapi DLL and appears in no proton
+script at all, yet works fine. So absence only counts for a variable the scan
+demonstrably detects in some other installed build. Anything it has never seen
+stays enabled, because unknown is not the same as unsupported.
 
 **🔍 ProtonDB check** — fetches the game's community rating and shows a
 coloured tier badge with a star score. Click the badge to open the game's
@@ -91,7 +108,7 @@ A global toggle writes the NVIDIA shader-disk-cache
 environment variables to `/etc/environment`, consolidating the driver's
 compiled shaders into one capped location that survives cleanup (this is the
 part that meaningfully reduces in-game shader stutter). Shows cache sizes per
-game, with clear-cache and delete-everything actions under **Advanced**.
+game, with clear-cache and delete-everything actions.
 
 Command Center does **not** try to pre-empt Steam's own "Processing Vulkan
 shaders" pass. Steam replays its `.foz` pipeline caches into its own database

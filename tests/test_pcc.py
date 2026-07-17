@@ -46,8 +46,8 @@ def make_mock_steam(base: Path) -> Path:
 
 class PCCTests(unittest.TestCase):
     _ORIGINALS = ("steam_running", "driver_version", "_nvidia_gpus", "_drm_gpus",
-                  "cpu_name", "find_font", "gpu_vram_mb",
-                  "shutdown_steam", "is_handheld", "subprocess", "MANGOHUD_DIR")
+                  "cpu_name", "find_font", "shutdown_steam", "subprocess",
+                  "MANGOHUD_DIR")
 
     def setUp(self):
         self._saved = {n: getattr(pcc, n) for n in self._ORIGINALS
@@ -139,33 +139,6 @@ class PCCTests(unittest.TestCase):
             pcc.swap_dll(str(game_dll), str(wrong))
 
     # ---- compile state ----
-    def test_compile_state_persists_and_invalidates(self):
-        appid = "12345"
-        self.assertFalse(pcc.compiled_status(self.root, appid)["compiled"])
-        pcc.mark_compiled(self.root, appid)
-        self.assertTrue(pcc.compiled_status(self.root, appid)["compiled"])
-        # survives "restart" (fresh read from disk)
-        self.assertTrue(
-            pcc.compiled_status(self.root, appid, pcc.load_state())["compiled"])
-        # driver change invalidates
-        pcc.driver_version = lambda: "595.20.01"
-        st = pcc.compiled_status(self.root, appid)
-        self.assertFalse(st["compiled"])
-        self.assertEqual(st["stale_reason"], "driver changed")
-        pcc.driver_version = lambda: "580.65.06"
-        # foz change flags outdated but keeps compiled
-        foz = self.root / "steamapps/shadercache/12345/fozpipelinesv6/steam_pipeline_cache.foz"
-        foz.write_bytes(b"changed")
-        os.utime(foz, (time.time() + 10, time.time() + 10))
-        st = pcc.compiled_status(self.root, appid)
-        self.assertTrue(st["compiled"])
-        self.assertTrue(st["outdated"])
-        # clear cache unmarks
-        pcc.mark_compiled(self.root, appid)
-        pcc.clear_cache(self.root, appid)
-        self.assertFalse(pcc.compiled_status(self.root, appid)["compiled"])
-
-    # ---- SGDB ----
     def test_sgdb_fetch_and_cache(self):
         pcc.save_config({"sgdb_api_key": "k3y"})
         calls = []
@@ -287,16 +260,6 @@ class PCCTests(unittest.TestCase):
                          "GE-Proton10-4")
         pcc.set_compat_tool(self.root, "12345", "")
         self.assertEqual(pcc.get_compat_tool(self.root, "12345")["name"], "")
-
-    def test_compiled_survives_new_pipeline_data(self):
-        pcc.mark_compiled(self.root, "12345")
-        foz = (self.root /
-               "steamapps/shadercache/12345/fozpipelinesv6/steam_pipeline_cache.foz")
-        foz.write_bytes(b"grown")
-        os.utime(foz, (time.time() + 5, time.time() + 5))
-        st = pcc.compiled_status(self.root, "12345")
-        self.assertTrue(st["compiled"])       # purple light stays on
-        self.assertTrue(st["outdated"])       # but flags recompile
 
     def test_session_env_no_crash_without_display(self):
         env = pcc.session_env()
@@ -466,25 +429,6 @@ class PCCTests(unittest.TestCase):
             pcc.owned_games(self.root)
 
     # ---- auto-tune ----
-    def test_detect_engine_and_autotune(self):
-        g = self.root / "steamapps/common/TestGame"
-        (g / "Engine").mkdir(exist_ok=True)
-        paks = g / "Game/Content/Paks"
-        paks.mkdir(parents=True)
-        (paks / "global.ucas").write_bytes(b"x")
-        (paks / "pak0.pak").write_bytes(b"x")
-        exe = g / "Game/Binaries/Win64"
-        exe.mkdir(parents=True)
-        (exe / "Game-Win64-Shipping.exe").write_bytes(
-            b"MZ" + b"\x00" * 50 + b"d3d12.dll")
-        det = pcc.detect_engine(g)
-        self.assertEqual(det["engine"], "unreal5")
-        self.assertTrue(det["dx12"])
-        pcc.gpu_vram_mb = lambda: 8188
-        r = pcc.auto_tune(self.root, "12345")
-        self.assertIn("PROTON_ENABLE_NVAPI=1", r["launch_string"])
-        self.assertIn("dxgi.maxDeviceMemory=7164", r["launch_string"])
-
     def test_steam_shader_settings_discovery_and_write(self):
         cfg = self.root / "userdata/12345678/config/localconfig.vdf"
         txt = cfg.read_text().replace(
@@ -891,6 +835,78 @@ class PCCTests(unittest.TestCase):
                     pcc.set_shader_threads(root, bad)
         finally:
             pcc.logical_cores = real
+
+    def test_proton_capabilities_fail_open(self):
+        """Builds differ: GE-Proton11-1 reads 29 vars Valve's Proton 11.0 does
+        not, so a launch string valid under GE can be inert under Valve. The
+        scan reads each build's launcher script - but it only sees what the
+        SCRIPT reads. DXVK_NVAPI_VKREFLEX is consumed by the dxvk-nvapi DLL and
+        appears in no proton script, yet works; treating unseen as unsupported
+        would wrongly disable it. So absence only counts for vars we can prove
+        we detect elsewhere (the union across builds); anything else fails open.
+        """
+        root = Path(self.tmp.name) / "sr"
+        ge = root / "compatibilitytools.d/GE-Proton11-1"; ge.mkdir(parents=True)
+        vp = root / "steamapps/common/Proton 11.0"; vp.mkdir(parents=True)
+        ge.joinpath("proton").write_text(
+            'PROTON_ENABLE_WAYLAND DXVK_HDR DXVK_ENABLE_NVAPI PROTON_USE_D7VK')
+        vp.joinpath("proton").write_text('DXVK_ENABLE_NVAPI')
+
+        cap = pcc.proton_capabilities(root)
+        # Keyed on the name Steam writes to CompatToolMapping, not the folder:
+        # official builds get a slug ("Proton 11.0" -> proton_11), custom ones
+        # use their own name. Verified against a real config.vdf.
+        self.assertIn("GE-Proton11-1", cap["tools"])
+        self.assertIn("proton_11", cap["tools"])
+        self.assertNotIn("Proton 11.0", cap["tools"])
+        self.assertIn("PROTON_ENABLE_WAYLAND", cap["known"])
+
+        def supported(tool, var):
+            if var not in cap["known"]:
+                return True                      # invisible to the scan
+            return var in cap["tools"].get(tool, [])
+
+        # proven absent on Valve -> safe to grey out
+        self.assertFalse(supported("proton_11", "PROTON_ENABLE_WAYLAND"))
+        self.assertFalse(supported("proton_11", "DXVK_HDR"))
+        # present on GE
+        self.assertTrue(supported("GE-Proton11-1", "PROTON_ENABLE_WAYLAND"))
+        # in both
+        self.assertTrue(supported("proton_11", "DXVK_ENABLE_NVAPI"))
+        # never seen by the scan but genuinely works -> must stay enabled
+        self.assertTrue(supported("proton_11", "DXVK_NVAPI_VKREFLEX"))
+
+    def test_official_slug_matches_steam(self):
+        """Steam names official builds with a slug but custom ones with their
+        directory name - two schemes, which is why fuzzy label matching never
+        worked. Verified against a real config.vdf CompatToolMapping."""
+        self.assertEqual(pcc._official_slug("Proton 11.0"), "proton_11")
+        self.assertEqual(pcc._official_slug("Proton 9.0"), "proton_9")
+        self.assertEqual(pcc._official_slug("Proton - Experimental"),
+                         "proton_experimental")
+        self.assertEqual(pcc._official_slug("Proton Hotfix"), "proton_hotfix")
+        # unknown shapes must return None rather than a guess: a wrong slug
+        # would write a name Steam doesn't know and break the game's setting
+        self.assertIsNone(pcc._official_slug("GE-Proton11-1"))
+        self.assertIsNone(pcc._official_slug("Proton EasyAntiCheat Runtime"))
+
+    def test_compat_tools_only_lists_installed(self):
+        """The hardcoded list offered proton_9/proton_10 whether installed or
+        not, and stopped at 10 - so a real Proton 11.0 couldn't be selected
+        while two absent builds could. Selecting an absent build also gave the
+        capability scan nothing to read, which looked like the validation was
+        broken."""
+        root = Path(self.tmp.name) / "sr2"
+        common = root / "steamapps/common"
+        (common / "Proton 11.0").mkdir(parents=True)
+        (common / "Proton 11.0" / "proton").write_text("x")
+        (common / "Proton - Experimental").mkdir(parents=True)
+        (common / "Proton - Experimental" / "proton").write_text("x")
+        names = [t["name"] for t in pcc.list_compat_tools(root)]
+        self.assertIn("proton_11", names)
+        self.assertIn("proton_experimental", names)
+        self.assertNotIn("proton_9", names)     # not installed -> not offered
+        self.assertNotIn("proton_10", names)
 
 
 if __name__ == "__main__":

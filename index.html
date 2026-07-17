@@ -107,7 +107,6 @@ main{padding:22px;max-width:1500px;margin:0 auto}
 .rail i.launch.lit{background:var(--launch)}
 .rail i.dlss.lit{background:var(--dlss)}
 .rail i.cache.lit{background:var(--cache)}
-.rail i.compiled.lit{background:var(--compiled)}
 .btn.violet{background:var(--compiled);border-color:var(--compiled);color:#160a24}
 .chip.v{color:var(--compiled);border-color:var(--compiled)}
 #globalBar{height:4px;background:transparent;position:fixed;top:0;left:0;right:0;z-index:40}
@@ -325,7 +324,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
     <div class="warn" id="steamWarn">Steam is running — saving will close it cleanly first (it overwrites launch options on exit otherwise).</div>
     <div class="section">
       <div class="row">
-        <button class="btn violet" id="autoTuneBtn">🔍 ProtonDB check</button>
+        <button class="btn violet" id="pdbCheckBtn">🔍 ProtonDB check</button>
         <span id="pdbBadge"></span>
       </div>
     </div>
@@ -465,23 +464,15 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
       <div id="threadsBox"><p class="note">Checking…</p></div>
     </div>
     <div class="section">
-      <button class="btn" id="advToggle" style="font-size:12px">▸ Advanced</button>
-      <div id="advPanel" style="display:none;margin-top:12px">
-        <h3>Steam's background processing</h3>
-        <div id="steamShader"><p class="note">Checking…</p></div>
-        <h3 style="margin-top:18px">Manual actions</h3>
-        <div class="row">
-          <button class="btn danger" id="clearCacheBtn">Clear compiled cache</button>
-          <button class="btn danger" id="clearAllBtn">Delete everything</button>
-        </div>
-        <p class="note">"Clear compiled cache" keeps the fozpipelinesv6 recordings (the source data);
-          "Delete everything" removes those too.</p>
-        <div class="row" style="margin-top:10px">
-          <label class="note" for="devIdx">GPU device index</label>
-          <select id="devIdx"><option>0</option><option>1</option><option>2</option></select>
-        </div>
-        <p class="note">Device index 0 is usually the dGPU.</p>
+      <h3>Steam's background processing</h3>
+      <div id="steamShader"><p class="note">Checking…</p></div>
+      <h3 style="margin-top:18px">Manual actions</h3>
+      <div class="row">
+        <button class="btn danger" id="clearCacheBtn">Clear compiled cache</button>
+        <button class="btn danger" id="clearAllBtn">Delete everything</button>
       </div>
+      <p class="note">"Clear compiled cache" keeps the fozpipelinesv6 recordings (the source data);
+        "Delete everything" removes those too.</p>
     </div>
   </div>
 
@@ -520,7 +511,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 
 <script>
 "use strict";
-const FRONTEND_VERSION="1.12.0";
+const FRONTEND_VERSION="1.14.0";
 const $=s=>document.querySelector(s);
 const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
 const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
@@ -536,17 +527,89 @@ function toast(msg,err){const t=$("#toast");t.textContent=msg;t.className="toast
 
 /* ---------- launch string builder ---------- */
 const TOGGLES=[
- {id:"wayland",label:"Native Wayland",hint:"PROTON_ENABLE_WAYLAND=1 — better latency/pacing and HDR without Gamescope, but breaks the Steam Overlay",env:"PROTON_ENABLE_WAYLAND=1"},
- {id:"hdr",label:"HDR",hint:"PROTON_ENABLE_HDR=1 DXVK_HDR=1 — disable the in-game HDR toggle if it conflicts",env:"PROTON_ENABLE_HDR=1 DXVK_HDR=1"},
+ {id:"wayland",needs:"PROTON_ENABLE_WAYLAND",label:"Native Wayland",hint:"PROTON_ENABLE_WAYLAND=1 — better latency/pacing and HDR without Gamescope, but breaks the Steam Overlay",env:"PROTON_ENABLE_WAYLAND=1"},
+ {id:"hdr",needs:"PROTON_ENABLE_HDR",label:"HDR",hint:"PROTON_ENABLE_HDR=1 DXVK_HDR=1 — disable the in-game HDR toggle if it conflicts",env:"PROTON_ENABLE_HDR=1 DXVK_HDR=1"},
  {id:"mangohud",label:"MangoHud overlay",hint:"Adds the mangohud wrapper — first enable writes PCC's custom horizontal overlay (orange labels, frametime graph, dGPU-pinned)",wrap:"mangohud"},
  {id:"gameperf",label:"game-performance",hint:"CachyOS wrapper: performance power profile + screensaver inhibit for the game",wrap:"game-performance"},
  {id:"steamdeckon",label:"Steam Deck spoof (=1)",hint:"SteamDeck=1 — spoofs Deck mode; helps some anti-cheat (ACE) accept Linux",env:"SteamDeck=1"},
  {id:"steamdeckoff",label:"Force Steam Deck off (=0)",hint:"SteamDeck=0 — explicitly disables Deck mode when something else enabled it",env:"SteamDeck=0"},
- {id:"nvapireflex",label:"DLSS + Reflex",hint:"PROTON_ENABLE_NVAPI=1 (DLSS) + DXVK_NVAPI_VKREFLEX=1 (Vulkan Reflex low-latency layer). Reflex only kicks in on games that implement VK_NV_low_latency2 — helps latency/frame pacing there, harmless elsewhere.",env:"PROTON_ENABLE_NVAPI=1 DXVK_NVAPI_VKREFLEX=1"},
+ {id:"nvapireflex",label:"Reflex low-latency",hint:"DXVK_NVAPI_VKREFLEX=1 — exposes dxvk-nvapi's Vulkan Reflex layer. Only kicks in on games implementing VK_NV_low_latency2; helps latency/frame pacing there, harmless elsewhere. (PROTON_ENABLE_NVAPI was dropped: NVAPI has been on by default since Proton 9 and the variable exists in no current build.)",env:"DXVK_NVAPI_VKREFLEX=1",needs:"DXVK_NVAPI_VKREFLEX"},
+ {id:"d7vk",needs:"PROTON_USE_D7VK",label:"D7VK (Direct3D 7)",hint:"PROTON_USE_D7VK=1 — routes ancient Direct3D 7 titles through DXVK. Off by default; GE enables it automatically for a couple of known games. Only useful on genuinely old games.",env:"PROTON_USE_D7VK=1"},
+ {id:"optiscaler",needs:"PROTON_USE_OPTISCALER",label:"OptiScaler",hint:"PROTON_USE_OPTISCALER=1 — lets OptiScaler hook the game's upscaler so you can swap DLSS/FSR/XeSS at runtime. Needs OptiScaler itself installed in the game folder; the variable alone does nothing.",env:"PROTON_USE_OPTISCALER=1"},
+ {id:"dlssupgrade",needs:"PROTON_DLSS_UPGRADE",label:"DLSS auto-upgrade",hint:"PROTON_DLSS_UPGRADE=1 — swaps the game's bundled DLSS DLL for the newest one Proton ships, without touching game files. Overlaps with the DLSS tab's manual swaps; pick one approach.",env:"PROTON_DLSS_UPGRADE=1"},
+ {id:"fsr4upgrade",needs:"PROTON_FSR4_UPGRADE",label:"FSR4 upgrade",hint:"PROTON_FSR4_UPGRADE=1 — upgrades FSR 3.1 DLLs to FSR 4. RDNA4 only in practice; on your NVIDIA GPU this won't do anything useful.",env:"PROTON_FSR4_UPGRADE=1"},
+ {id:"noesync",needs:"PROTON_NO_ESYNC",label:"Disable esync",hint:"PROTON_NO_ESYNC=1 — turns off eventfd synchronisation. A troubleshooting switch: try it only if a game hangs or crashes on launch, since esync is normally a performance win.",env:"PROTON_NO_ESYNC=1"},
  {id:"gamescope",label:"Gamescope (NVIDIA)",hint:"Wraps the game in gamescope at your display's native resolution/refresh with adaptive-sync + --mangoapp overlay. Forces NVAPI on so DLSS works inside gamescope. Can improve frame pacing by isolating the game from the desktop compositor. NOTE: overrides all other options above except the Proton version.",gamescope:true},
- {id:"gshdr",label:"↳ Gamescope HDR",hint:"Adds --hdr-enabled + DXVK_HDR=1 to the gamescope command. EXPERIMENTAL on NVIDIA: works on many DX11 titles but can black-screen or hang some DX12 games. Only has an effect when Gamescope is on. Turn off if a game shows no image.",gshdr:true},
+ {id:"gshdr",needs:"DXVK_HDR",label:"↳ Gamescope HDR",hint:"Adds --hdr-enabled + DXVK_HDR=1 to the gamescope command. EXPERIMENTAL on NVIDIA: works on many DX11 titles but can black-screen or hang some DX12 games. Only has an effect when Gamescope is on. Turn off if a game shows no image.",gshdr:true},
 ];
 let manualEdit=false;
+
+/* Which env vars each installed Proton build understands. Populated once at
+   load from a scan of each build's launcher script. `known` is the union: the
+   vars the scan can actually see. A var outside it (DXVK_NVAPI_VKREFLEX, read
+   by the dxvk-nvapi DLL rather than the script) is invisible to us, NOT absent
+   - so unknown always means "leave it enabled". */
+let PROTON_CAPS={tools:{},known:[]};
+// Re-scanned when a panel opens and after a GE-Proton install, so a build
+// added while PCC is open is picked up without a page refresh.
+async function refreshCapabilities(){
+  try{
+    PROTON_CAPS=await api("/api/proton_capabilities");
+    applyCapabilities();
+  }catch(e){/* keep whatever we had */}
+}
+refreshCapabilities();
+function buildSupports(tool,varName){
+  if(!varName) return true;
+  if(!PROTON_CAPS.known.length) return true;        // no scan data yet
+  if(!PROTON_CAPS.known.includes(varName)) return true;   // scan can't see it
+  const vars=PROTON_CAPS.tools[tool];
+  if(!vars) return true;                            // unknown build
+  return vars.includes(varName);
+}
+// The compat selector's value IS the name Steam uses in CompatToolMapping,
+// and the capability scan is keyed on the same, so this is an exact lookup.
+// It used to try matching the dropdown's LABEL against directory names, which
+// silently matched nothing ("Proton - Experimental" vs "Proton Experimental")
+// and quietly returned null - and null means "unknown build", which fails
+// open. That's why no toggle ever greyed out.
+function selectedToolDir(){
+  const sel=$("#compatSel");
+  if(!sel||!sel.value) return null;          // "Steam default" - build unknown
+  return PROTON_CAPS.tools[sel.value] ? sel.value : null;
+}
+function applyCapabilities(){
+  const tool=selectedToolDir();
+  for(const t of TOGGLES){
+    if(!t.needs) continue;
+    const input=document.querySelector(`#toggles input[data-id="${t.id}"]`);
+    if(!input) continue;
+    const row=input.closest(".toggle");
+    const ok=!tool||buildSupports(tool,t.needs);
+    const note=row.querySelector(".unsupported");
+    if(ok){
+      if(input.dataset.capDisabled){delete input.dataset.capDisabled;input.disabled=false;row.style.opacity="";}
+      if(note)note.remove();
+    }else{
+      input.checked=false;
+      input.disabled=true;
+      input.dataset.capDisabled="1";
+      row.style.opacity=".45";
+      if(!note){
+        const s=document.createElement("small");
+        s.className="unsupported";
+        s.style.color="var(--danger)";
+        s.textContent=`${tool} doesn't support ${t.needs} — setting it would do nothing`;
+        row.querySelector("div").appendChild(s);
+      }
+    }
+  }
+  if(typeof buildString==="function")buildString();
+}
+
+document.addEventListener("change",e=>{
+  if(e.target&&e.target.id==="compatSel")applyCapabilities();
+});
 
 function renderToggles(){
   $("#toggles").innerHTML=TOGGLES.map(t=>`
@@ -705,7 +768,6 @@ let games=[],current=null,statusById={};
 function seedStatus(list){
   list.forEach(g=>statusById[g.appid]={...statusById[g.appid],
     launch:!!g.has_launch_options,dlss:!!g.has_dlss,cache:!!g.has_cache,
-    compiled:!!g.compiled,outdated:!!g.outdated,
     installing:g.fully_installed===false,pct:g.download_pct});
 }
 let steamIsRunning=false;
@@ -745,7 +807,7 @@ function renderGrid(filter=""){
       <div class="body">
         <img loading="lazy" src="https://cdn.cloudflare.steamstatic.com/steam/apps/${g.appid}/header.jpg"
              data-appid="${g.appid}" data-fallback="0" alt="">
-        <div class="meta"><b>${esc(g.name)}</b><small>${g._uninstalled?"not installed":((statusById[g.appid]||{}).installing?("installing"+((statusById[g.appid]||{}).pct?" · "+(statusById[g.appid]||{}).pct+"%":"…")):(g.size_bytes?fmtMB(g.size_bytes):"—"))}</small></div>
+        <div class="meta"><b>${esc(g.name)}</b><small>${(statusById[g.appid]||{}).installing?("installing"+((statusById[g.appid]||{}).pct!=null?" · "+(statusById[g.appid]||{}).pct+"%":"…")):(g._uninstalled?"not installed":(g.size_bytes?fmtMB(g.size_bytes):"—"))}</small></div>
         ${g._uninstalled?`<button class="installbtn" data-install="${g.appid}">Install</button>`:`<button class="playbtn" data-play="${g.appid}" title="Play">▶</button>`}
       </div>
       <div class="cardbar"><i></i></div>
@@ -1099,6 +1161,7 @@ async function openGame(appid){
     loadStringIntoUI(lo.value||"");
     statusById[appid]={...statusById[appid],launch:!!lo.value};
   }catch(e){loadStringIntoUI("")}
+  refreshCapabilities();
   loadLibrary().then(()=>loadDLSS(appid));loadCache(appid);loadBench(appid);loadCompat(appid);loadSteamShader();loadShaderEnv();loadCachedPdb(appid);
 }
 
@@ -1281,12 +1344,6 @@ async function disableSteamBackgroundShaders(){
   }catch(e){return {ok:false,reason:e.message}}
 }
 
-$("#advToggle")?.addEventListener("click",()=>{
-  const p=$("#advPanel");const open=p.style.display!=="none";
-  p.style.display=open?"none":"block";
-  $("#advToggle").textContent=(open?"▸":"▾")+" Advanced";
-});
-
 function trackTask(id,barSel,onDone,detailSel){
   const bar=$(barSel);bar.classList.add("show");bar.querySelector("i").style.width="0%";
   const iv=setInterval(async()=>{
@@ -1373,10 +1430,10 @@ async function loadCachedPdb(appid){
     }
   }catch(e){/* no cached rating; leave badge empty until user checks */}
 }
-$("#autoTuneBtn").addEventListener("click",async()=>{
+$("#pdbCheckBtn").addEventListener("click",async()=>{
   if(!current)return;
   const appid=current.appid;
-  const btn=$("#autoTuneBtn");btn.disabled=true;btn.textContent="Checking…";
+  const btn=$("#pdbCheckBtn");btn.disabled=true;btn.textContent="Checking…";
   try{
     const d=await api(`/api/game/${appid}/protondb`);
     PDB_CACHE[appid]={tier:d&&d.tier?d.tier:null,total:d&&d.total?d.total:0};
@@ -1385,8 +1442,20 @@ $("#autoTuneBtn").addEventListener("click",async()=>{
   btn.disabled=false;btn.textContent="🔍 ProtonDB check";
 });
 
-/* ---------- live install progress ---------- */
-let pollTimer=null,pollMisses=0;
+/* ---------- live install progress ----------
+   Three things this has to survive, all of which used to strand the card at
+   "not installed" until a manual browser refresh:
+     - a single failed request (backend restart, blip). It used to call
+       stopPolling() on any error, with nothing to ever restart it.
+     - the tab going hidden. Polling stopped, and on return it only resumed
+       `if(anyInstalling())` - but that's read from poll results, so if you hit
+       Install and immediately switched to Steam to watch the download, it had
+       never polled, believed nothing was installing, and stayed asleep.
+     - Steam-initiated installs, which start with no click here at all.
+   So: poll whenever the tab is visible, and on failure back off but never
+   give up. The endpoint only reads manifests, so this is cheap.            */
+let pollTimer=null, pollFails=0;
+const POLL_OK=3000, POLL_MAX=30000;
 function anyInstalling(){return Object.values(statusById).some(s=>s&&s.installing)}
 function paintProgress(list){
   let changed=false, active=false;
@@ -1416,6 +1485,7 @@ async function pollProgress(){
   try{
     const d=await api("/api/progress");
     const {changed,active}=paintProgress(d.games);
+    if(pollFails){pollFails=0;schedulePoll(POLL_OK)}   // recovered
     if(changed){                       // an install completed
       const gd=await api("/api/games");
       games=gd.games.filter(g=>g.installed&&g.fully_installed!==false);
@@ -1425,20 +1495,30 @@ async function pollProgress(){
       renderGrid($("#search").value);
       toast("Install finished");
     }
-    // keep polling while visible so Steam-initiated installs are caught;
-    // the endpoint is manifest-only and cheap.
-  }catch(e){stopPolling()}
+  }catch(e){
+    // Never give up - just slow down. Killing the timer here was why one
+    // transient error meant refreshing the browser to get progress back.
+    pollFails++;
+    schedulePoll(Math.min(POLL_OK*Math.pow(2,pollFails), POLL_MAX));
+  }
+}
+function schedulePoll(ms){
+  if(pollTimer)clearInterval(pollTimer);
+  pollTimer=setInterval(pollProgress,ms);
 }
 function startPolling(){
   if(pollTimer)return;
-  pollMisses=0;
+  pollFails=0;
   pollProgress();
-  pollTimer=setInterval(pollProgress,3000);
+  schedulePoll(POLL_OK);
 }
 function stopPolling(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
 document.addEventListener("visibilitychange",()=>{
   if(document.hidden)stopPolling();
-  else if(anyInstalling())startPolling();
+  // Always resume - don't gate on anyInstalling(). That flag comes FROM
+  // polling, so if the tab was hidden before the first result arrived (hit
+  // Install, switch to Steam, come back) it was false and polling never woke.
+  else startPolling();
 });
 
 /* ---------- owned library ---------- */
@@ -1474,6 +1554,7 @@ async function loadCompat(appid){
     const cur=await api(`/api/game/${appid}/compat_tool`);
     $("#compatSel").innerHTML=compatTools.map(t=>
       `<option value="${esc(t.name)}" ${t.name===cur.name?"selected":""}>${esc(t.label)}${t.custom?" ★":""}</option>`).join("");
+    applyCapabilities();
   }catch(e){$("#compatSel").innerHTML='<option value="">Steam default</option>'}
 }
 /* compat now saved via the merged Save all button */
@@ -1645,6 +1726,15 @@ async function loadProtonList(){
             if(t.detail)b.textContent=t.detail.length>18?t.detail.slice(0,18)+"…":t.detail;
             if(t.status==="done"||t.status==="error"){
               clearInterval(iv);toast(t.detail,t.status==="error");loadProtonList();
+              // a new build just landed: rescan so its toggles unlock without
+              // needing a page refresh
+              // The Proton list lives in Settings, which can be open with no
+              // game selected - loadCompat(null) would fetch /api/game/null/...
+              // and its catch would reset the selector to "Steam default".
+              if(t.status==="done"){
+                refreshCapabilities();
+                if(current&&current.appid)loadCompat(current.appid);
+              }
             }
           }catch(e){clearInterval(iv);b.disabled=false;b.textContent="Install"}
         },1000);

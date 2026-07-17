@@ -25,7 +25,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.12.0"
+VERSION = "1.14.0"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -62,7 +62,7 @@ def load_config():
         return {}
 
 
-def save_config(cfg):
+def save_config(cfg) -> None:
     tmp = CONFIG_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(cfg, indent=1))
     tmp.replace(CONFIG_FILE)
@@ -79,7 +79,7 @@ def _sgdb_get(path, key):
         return json.loads(r.read())
 
 
-def _valid_image(data):
+def _valid_image(data) -> bool:
     return bool(data) and (data[:2] == b"\xff\xd8"            # JPEG
                            or data[:8] == b"\x89PNG\r\n\x1a\n"  # PNG
                            or (data[:4] == b"RIFF" and data[8:12] == b"WEBP"))
@@ -110,8 +110,7 @@ ART_MISSES = {}  # appid -> timestamp of last failed lookup (avoid re-hammering)
 
 
 def _sgdb_grids(path_base, key, t):
-    """Grids at preferred dimensions first, then any static grid at all —
-    many entries (esp. new/beta games) only have portrait or odd sizes."""
+    """Grids at preferred dimensions first, then any static grid at all - many entries (esp. new/beta games) only have portrait or odd sizes."""
     for suffix in ("?dimensions=460x215,920x430&types=static", "?types=static"):
         try:
             data = _sgdb_get(path_base + suffix, key)
@@ -128,9 +127,9 @@ def _sgdb_grids(path_base, key, t):
     return None
 
 
-def sgdb_art(appid, name=None, trace=None):
+def sgdb_art(appid: str, name=None, trace=None):
     """Resolve 460x215 art through a cascade covering beta/demo appids.
-    Cached files are validated by magic bytes on every serve — corrupt
+    Cached files are validated by magic bytes on every serve - corrupt
     entries from failed fetches self-delete and re-fetch. Misses are
     negative-cached for 10 minutes only."""
     t = trace if trace is not None else []
@@ -141,7 +140,7 @@ def sgdb_art(appid, name=None, trace=None):
             if _valid_image(data):
                 t.append(f"disk cache hit ({ext})")
                 return data, ct
-            cached.unlink(missing_ok=True)   # poisoned entry — self-heal
+            cached.unlink(missing_ok=True)   # poisoned entry - self-heal
             t.append(f"deleted corrupt cached {ext}")
     if time.time() - ART_MISSES.get(str(appid), 0) < 600:
         t.append("negative-cached (retries in <10 min)")
@@ -204,7 +203,7 @@ def load_state():
         return {"compiled": {}}
 
 
-def save_state(state):
+def save_state(state) -> None:
     with STATE_LOCK:
         tmp = STATE_FILE.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(state, indent=1))
@@ -242,79 +241,7 @@ FOZ_INPUT_RE = re.compile(
 FOZ_LEDGER_RE = re.compile(r"^replay_cache\.[0-9a-f]+\.foz$", re.I)
 
 
-def find_foz(root, appid):
-    """Replayable pipeline databases. Excludes whitelists, the replayer
-    ledger, and driver caches (mesa_shader_cache_sf/**)."""
-    out = []
-    for lib in library_folders(root):
-        base = lib / "shadercache" / str(appid) / "fozpipelinesv6"
-        if not base.is_dir():
-            continue
-        for p in base.rglob("*.foz"):
-            if FOZ_INPUT_RE.match(p.name) and p.stat().st_size > 0:
-                out.append(str(p))
-    return sorted(set(out))
-
-
-def foz_fingerprint(foz_files):
-    if not foz_files:
-        return None
-    parts = []
-    for f in foz_files:
-        try:
-            st = os.stat(f)
-            parts.append(f"{f}:{st.st_size}:{int(st.st_mtime)}")
-        except OSError:
-            pass
-    return hashlib.sha256("|".join(sorted(parts)).encode()).hexdigest()
-
-
-def compiled_status(root, appid, state=None, drv=None):
-    """compiled stays true as long as a compile is recorded and the driver
-    hasn't changed — new pipeline data since the compile marks it 'outdated'
-    (recompile recommended) rather than flipping the light off. Only a
-    driver update or cache deletion clears it."""
-    state = state or load_state()
-    entry = state.get("compiled", {}).get(str(appid))
-    if not entry:
-        return {"compiled": False, "outdated": False}
-    drv = drv or driver_version()
-    if entry.get("driver") != drv:
-        return {"compiled": False, "outdated": False,
-                "stale_reason": "driver changed",
-                "compiled_at": entry.get("compiled_at")}
-    fp = foz_fingerprint(find_foz(root, appid))
-    outdated = fp is not None and entry.get("fingerprint") != fp
-    return {
-        "compiled": True,
-        "outdated": outdated,
-        "compiled_at": entry.get("compiled_at"),
-        "driver": entry.get("driver"),
-        "stale_reason": "new pipeline data since compile" if outdated else None,
-    }
-
-
-def mark_compiled(root, appid):
-    state = load_state()
-    state.setdefault("compiled", {})[str(appid)] = {
-        "fingerprint": foz_fingerprint(find_foz(root, appid)),
-        "driver": driver_version(),
-        "compiled_at": int(time.time()),
-    }
-    save_state(state)
-
-
-def unmark_compiled(appid):
-    state = load_state()
-    if state.get("compiled", {}).pop(str(appid), None) is not None:
-        save_state(state)
-
-
-# --------------------------------------------------------------------------
-# Steam discovery
-# --------------------------------------------------------------------------
-
-def steam_root():
+def steam_root() -> Path | None:
     for p in [
         Path.home() / ".local/share/Steam",
         Path.home() / ".steam/steam",
@@ -325,7 +252,7 @@ def steam_root():
     return None
 
 
-def steam_running():
+def steam_running() -> bool:
     try:
         out = subprocess.run(["pgrep", "-x", "steam"], capture_output=True)
         return out.returncode == 0
@@ -333,7 +260,7 @@ def steam_running():
         return False
 
 
-def shutdown_steam(timeout=60):
+def shutdown_steam(timeout=60) -> bool:
     """Ask Steam to exit gracefully and wait until it's gone.
     Graceful matters: Steam flushes localconfig.vdf on clean exit."""
     if not steam_running():
@@ -360,7 +287,7 @@ SESSION_ENV_KEYS = ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY",
 def session_env():
     """Launch env for GUI apps. The backend may have been started without
     DISPLAY/WAYLAND_DISPLAY (systemd, ssh, stale shell) which makes Steam
-    fail with display errors — harvest the vars from the user's running
+    fail with display errors - harvest the vars from the user's running
     graphical session processes instead."""
     env = dict(os.environ)
     if env.get("DISPLAY") or env.get("WAYLAND_DISPLAY"):
@@ -393,7 +320,7 @@ def session_env():
     return env
 
 
-def _spawn_detached(cmd):
+def _spawn_detached(cmd) -> bool:
     """Launch GUI apps OUTSIDE our service cgroup. Without this, Steam and
     games become children of the backend's systemd unit: the service gets
     charged for their memory, and a service restart kills the game."""
@@ -418,14 +345,14 @@ def launch_steam():
     return _spawn_detached([exe])
 
 
-def launch_game(appid):
+def launch_game(appid: str):
     exe = shutil.which("steam")
     if not exe:
         raise RuntimeError("'steam' command not found in PATH")
     return _spawn_detached([exe, f"steam://rungameid/{appid}"])
 
 
-def library_folders(root):
+def library_folders(root: Path):
     """All steamapps dirs across library folders."""
     libs = [root / "steamapps"]
     vdf = root / "steamapps/libraryfolders.vdf"
@@ -473,7 +400,7 @@ _APP_BUSY = (APP_UPDATE_REQUIRED | APP_FILES_MISSING | APP_UPDATE_RUNNING
              | APP_UPDATE_PAUSED | APP_UPDATE_STARTED)
 
 
-def _is_installing(flags):
+def _is_installing(flags) -> bool:
     """True when Steam has real pending work for this app.
 
     A game is done only when FullyInstalled is set and no update/repair bit is.
@@ -486,7 +413,7 @@ def _is_installing(flags):
     return bool(flags & _APP_BUSY)
 
 
-def list_games(root):
+def list_games(root: Path):
     games = []
     seen = set()
     for lib in library_folders(root):
@@ -533,7 +460,7 @@ def list_games(root):
 
 
 # --------------------------------------------------------------------------
-# VDF (text) parse / serialize — round-trip safe for localconfig.vdf
+# VDF (text) parse / serialize - round-trip safe for localconfig.vdf
 # --------------------------------------------------------------------------
 
 def vdf_parse(text):
@@ -635,7 +562,7 @@ def ci_ensure(d, key):
     return d[key]
 
 
-def find_localconfigs(root):
+def find_localconfigs(root: Path):
     """Every user's localconfig.vdf, newest first."""
     userdata = root / "userdata"
     if not userdata.is_dir():
@@ -645,7 +572,7 @@ def find_localconfigs(root):
     return configs
 
 
-def get_launch_options(root, appid):
+def get_launch_options(root: Path, appid: str) -> dict:
     for cfg in find_localconfigs(root):
         try:
             data = vdf_parse(cfg.read_text(errors="replace"))
@@ -663,7 +590,7 @@ def get_launch_options(root, appid):
     return {"value": "", "config": str(cfgs[0]) if cfgs else None}
 
 
-def _apps_node(store):
+def _apps_node(store) -> bool:
     sw = ci_get(store, "Software")
     valve = ci_get(sw, "Valve")
     steam = ci_get(valve, "Steam")
@@ -679,8 +606,8 @@ def vdf_unescape(s):
 
 
 
-def set_game_config(root, appid, launch_value=None, compat_tool=None,
-                    close_steam=False):
+def set_game_config(root: Path, appid: str, launch_value=None, compat_tool=None,
+                    close_steam=False) -> dict:
     """Single-save: write launch options AND compat tool together, closing
     Steam once for both rather than twice."""
     result = {}
@@ -700,7 +627,7 @@ SHADER_ENV_VARS = {
     # Only vars that still do something on modern stock Proton (DXVK >= 2.7) are
     # included. DXVK_ASYNC and DXVK_STATE_CACHE were both removed upstream once
     # Vulkan GPL (graphics_pipeline_library) made them obsolete, so they are
-    # deliberately omitted — setting them achieves nothing. What remains is the
+    # deliberately omitted - setting them achieves nothing. What remains is the
     # NVIDIA driver-level shader disk cache, which is independent of DXVK and
     # genuinely persists compiled shaders across runs.
     "__GL_SHADER_DISK_CACHE": "1",
@@ -718,7 +645,7 @@ def read_environment():
         return ""
 
 
-def environment_shader_status():
+def environment_shader_status() -> dict:
     txt = read_environment()
     present = {}
     for k in SHADER_ENV_VARS:
@@ -728,7 +655,7 @@ def environment_shader_status():
             "vars": present}
 
 
-def set_environment_shaders(enable):
+def set_environment_shaders(enable) -> dict:
     """Add or remove the shader-cache env vars in /etc/environment via pkexec.
     Preserves every other line; only touches our keys."""
     Path(SHADER_ENV_VARS["__GL_SHADER_DISK_CACHE_PATH"]).mkdir(
@@ -759,7 +686,7 @@ def set_environment_shaders(enable):
     return {"enabled": enable, "note": "Log out and back in for changes to apply."}
 
 
-def set_launch_options(root, appid, value, close_steam=False):
+def set_launch_options(root: Path, appid: str, value, close_steam=False) -> dict:
     if steam_running():
         if close_steam:
             shutdown_steam()
@@ -877,7 +804,7 @@ def _backup_path(dll_path):
 
 
 
-def dedupe_dll_library():
+def dedupe_dll_library() -> None:
     """One-time housekeeping: if two directories under a kind hold the same real
     DLL version (e.g. a garbage-named dir from the old parser plus a correctly
     named one), keep the correctly-named one and remove the rest. Safe to run on
@@ -937,7 +864,7 @@ def dll_library():
     return out
 
 
-def import_dll(src_path):
+def import_dll(src_path) -> dict:
     p = Path(src_path).expanduser()
     if not p.is_file():
         raise RuntimeError(f"File not found: {p}")
@@ -954,7 +881,7 @@ def import_dll(src_path):
     shutil.copy2(p, dest / p.name.lower())
     # Remove any OTHER directory for this kind that actually holds the SAME
     # version (e.g. a garbage-named dir from the old parser). Different real
-    # versions are kept — downgrading stays possible.
+    # versions are kept - downgrading stays possible.
     if kind_root.is_dir():
         for vdir in kind_root.iterdir():
             if not vdir.is_dir() or vdir.name == ver:
@@ -984,7 +911,7 @@ def version_tuple(v):
         return (0,)
 
 
-def friendly_dlss(version):
+def friendly_dlss(version) -> dict:
     """310.2.1.0 -> {'gen': 'DLSS 4', 'short': '310.2.1'};
     3.7.10.0 -> {'gen': 'DLSS 3', 'short': '3.7.10'}"""
     if not version:
@@ -1059,7 +986,7 @@ def _find_in_tree(repo, branch, fname):
 
 
 def _probe_dirs(repo, branch, fname):
-    """Contents-API probe of known DLL directories — works even when the
+    """Contents-API probe of known DLL directories - works even when the
     tree listing is truncated."""
     for d in CANDIDATE_DLL_DIRS:
         try:
@@ -1113,7 +1040,7 @@ DLSS_MANIFEST_SECTION = {"sr": "dlss", "fg": "dlss_g", "rr": "dlss_d"}
 def _manifest_latest(kind, task_id):
     """Fetch DLSS Swapper's manifest (the same one that tool refreshes every
     launch) and return (version, dll_bytes) for the newest STABLE entry of the
-    requested kind. Covers SR/FG/RR — this is how the latest DLSS 4.x DLLs are
+    requested kind. Covers SR/FG/RR - this is how the latest DLSS 4.x DLLs are
     found. Returns None on any failure so callers fall back to NVIDIA repos."""
     import zipfile, io
     section = DLSS_MANIFEST_SECTION.get(kind)
@@ -1149,7 +1076,7 @@ def _manifest_latest(kind, task_id):
     return None
 
 
-def download_dlss(task_id, kind):
+def download_dlss(task_id, kind) -> None:
     """Fetch the requested DLL kind from NVIDIA's official repos. Strategy per
     repo: tree search -> directory probe (tree may be truncated) -> release
     zip. Raw downloads resolve Git LFS pointers automatically."""
@@ -1160,7 +1087,7 @@ def download_dlss(task_id, kind):
                       "detail": f"Looking for {label} DLL"}
     errors = []
 
-    # PRIMARY: DLSS Swapper's manifest — refreshed constantly, carries the
+    # PRIMARY: DLSS Swapper's manifest - refreshed constantly, carries the
     # newest SR/FG/RR versions (this is the fix for "not fetching the latest").
     try:
         TASKS[task_id]["detail"] = "Checking DLSS Swapper manifest"
@@ -1234,7 +1161,7 @@ def download_latest_sr(task_id):  # kept for compatibility
     download_dlss(task_id, "sr")
 
 
-def swap_dll(game_dll_path, library_dll_path):
+def swap_dll(game_dll_path, library_dll_path) -> dict:
     game_dll = Path(game_dll_path)
     lib_dll = Path(library_dll_path)
     if not game_dll.is_file():
@@ -1250,7 +1177,7 @@ def swap_dll(game_dll_path, library_dll_path):
     return {"swapped": True, "new_version": pe_version(game_dll), "backup": str(bak)}
 
 
-def restore_dll(game_dll_path):
+def restore_dll(game_dll_path) -> dict:
     game_dll = Path(game_dll_path)
     bak = _backup_path(game_dll)
     if not bak.exists():
@@ -1260,10 +1187,10 @@ def restore_dll(game_dll_path):
 
 
 # --------------------------------------------------------------------------
-# Owned library (community profile XML — no API key needed)
+# Owned library (community profile XML - no API key needed)
 # --------------------------------------------------------------------------
 
-def get_steamid64(root):
+def get_steamid64(root: Path):
     """Most recent login's SteamID64 from config/loginusers.vdf."""
     lu = root / "config/loginusers.vdf"
     if not lu.is_file():
@@ -1285,7 +1212,7 @@ def get_steamid64(root):
     return best
 
 
-def fetch_owned_games(root, force=False):
+def fetch_owned_games(root: Path, force=False) -> dict:
     """All games the user owns, via the public community profile XML.
     Cached in state.json for 6 hours. Returns {'games': [...], 'error': str|None}."""
     state = load_state()
@@ -1328,83 +1255,7 @@ def fetch_owned_games(root, force=False):
 # --------------------------------------------------------------------------
 # Auto-tune: engine detection + curated tuning rules
 # --------------------------------------------------------------------------
-def detect_engine(install_path):
-    """Identify the game engine from on-disk markers. Fast: bounded walk."""
-    base = Path(install_path)
-    ev, engine, dx12 = [], None, None
-    if not base.is_dir():
-        return {"engine": None, "dx12": None, "evidence": ["install dir missing"]}
-    names, exes = set(), []
-    ucas = pak = False
-    for i, (dirpath, dirnames, filenames) in enumerate(os.walk(base)):
-        if i > 400:
-            break
-        depth = len(Path(dirpath).relative_to(base).parts)
-        if depth > 4:
-            dirnames[:] = []
-            continue
-        for d in dirnames:
-            names.add(d.lower())
-        for f in filenames:
-            fl = f.lower()
-            names.add(fl)
-            if fl.endswith(".exe"):
-                exes.append(Path(dirpath) / f)
-            if fl.endswith((".ucas", ".utoc")):
-                ucas = True
-            if fl.endswith(".pak"):
-                pak = True
-            if fl.startswith("re_chunk"):
-                engine, _ = "re-engine", ev.append(f"{f} (RE Engine chunk)")
-    if any(n.endswith("_data") for n in names) and "unityplayer.dll" in names:
-        engine = "unity"
-        ev.append("UnityPlayer.dll + *_Data folder")
-    if "engine" in names and pak:
-        engine = "unreal5" if ucas else "unreal4"
-        ev.append("Engine/ + .pak" + (" + IoStore .ucas/.utoc (UE5-style)" if ucas else ""))
-    if any(n.endswith("-win64-shipping.exe") for n in names) and not engine:
-        engine = "unreal4"
-        ev.append("*-Win64-Shipping.exe")
-    if "gameinfo.gi" in names:
-        engine, _ = "source2", ev.append("gameinfo.gi")
-    elif "gameinfo.txt" in names:
-        engine, _ = "source", ev.append("gameinfo.txt")
-    if any(n.endswith(".pck") for n in names) and not engine:
-        engine, _ = "godot", ev.append(".pck archive")
-    if "data.win" in names and not engine:
-        engine, _ = "gamemaker", ev.append("data.win")
-    # DX12 vs DX11: scan the biggest exe for imported runtime names
-    exes.sort(key=lambda e: e.stat().st_size, reverse=True)
-    for exe in exes[:2]:
-        try:
-            blob = exe.read_bytes()[:12_000_000]
-        except OSError:
-            continue
-        has12 = b"d3d12.dll" in blob or b"D3D12" in blob
-        has11 = b"d3d11.dll" in blob or b"D3D11" in blob
-        if has12:
-            dx12 = True
-            ev.append(f"{exe.name}: references D3D12")
-            break
-        if has11:
-            dx12 = False
-            ev.append(f"{exe.name}: references D3D11")
-    return {"engine": engine, "dx12": dx12, "evidence": ev}
-
-
-def gpu_vram_mb():
-    try:
-        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.total",
-                              "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=5)
-        if out.returncode == 0:
-            return int(out.stdout.strip().splitlines()[0])
-    except Exception:
-        pass
-    return None
-
-
-DEFAULT_TUNING_RULES = {
+NING_RULES = {
     "base_env": {"PROTON_ENABLE_NVAPI": "1", "PROTON_USE_NTSYNC": "1"},
     "base_wrappers": ["game-performance"],
     "vram_cap_below_mb": 12000,
@@ -1454,64 +1305,11 @@ DEFAULT_TUNING_RULES = {
 }
 
 
-def load_tuning_rules():
-    custom = DATA_DIR / "tuning_rules.json"
-    if custom.is_file():
-        try:
-            return json.loads(custom.read_text())
-        except Exception:
-            pass
-    return DEFAULT_TUNING_RULES
-
-
-
-
-HANDHELD_DMI = ("jupiter", "galileo", "rog ally", "legion go", "ayaneo",
+MI = ("jupiter", "galileo", "rog ally", "legion go", "ayaneo",
                 "gpd win", "onexplayer", "steam deck")
 
 
-def is_handheld():
-    """Detect Steam Deck / handheld PCs via DMI so desktop-only fixes
-    (like SteamDeck=0) are never applied on actual handhelds."""
-    for f in ("/sys/devices/virtual/dmi/id/product_name",
-              "/sys/devices/virtual/dmi/id/board_name"):
-        try:
-            name = Path(f).read_text().strip().lower()
-            if any(h in name for h in HANDHELD_DMI):
-                return True
-        except OSError:
-            continue
-    return os.environ.get("SteamDeck") == "1"
-
-
-def deck_verified(appid):
-    """Valve's own Deck compatibility verdict — professionally tested,
-    the highest-trust community-adjacent source. Cached 7 days."""
-    state = load_state()
-    cache = state.get("deckverified", {}).get(str(appid))
-    if cache and time.time() - cache.get("ts", 0) < 7 * 86400:
-        return cache.get("data")
-    out = None
-    try:
-        req = urllib.request.Request(
-            "https://store.steampowered.com/saleaction/"
-            f"ajaxgetdeckappcompatibilityreport?nAppID={appid}&l=english",
-            headers={"User-Agent": "proton-command-center"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            data = json.loads(r.read())
-        results = (data.get("results") or {})
-        code = results.get("resolved_category")
-        out = {"category": {3: "Verified", 2: "Playable",
-                            1: "Unsupported", 0: "Unknown"}.get(code, "Unknown"),
-               "code": code}
-    except Exception:
-        out = None
-    state.setdefault("deckverified", {})[str(appid)] = {"ts": time.time(), "data": out}
-    save_state(state)
-    return out
-
-
-def protondb_cached(appid):
+def protondb_cached(appid: str):
     """Return a previously-fetched ProtonDB rating from state without ever
     hitting the network. Used to repopulate the badge when the app reopens, so
     a rating the user already checked stays visible. Returns None if never
@@ -1523,7 +1321,7 @@ def protondb_cached(appid):
     return None
 
 
-def protondb_summary(appid):
+def protondb_summary(appid: str):
     """Community compatibility tier from ProtonDB (cached 24h)."""
     state = load_state()
     cache = state.get("protondb", {}).get(str(appid))
@@ -1544,115 +1342,7 @@ def protondb_summary(appid):
     return out
 
 
-def umu_fix_info(appid):
-    """Does umu-protonfixes (the fix database GE-Proton applies automatically)
-    have a fix script for this appid? Returns a summary if so. Cached 24h."""
-    state = load_state()
-    cache = state.get("umufix", {}).get(str(appid))
-    if cache and time.time() - cache.get("ts", 0) < 86400:
-        return cache.get("data")
-    out = None
-    try:
-        url = ("https://raw.githubusercontent.com/Open-Wine-Components/"
-               f"umu-protonfixes/main/gamefixes-steam/{appid}.py")
-        req = urllib.request.Request(url, headers={"User-Agent": "pcc"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            src = r.read().decode(errors="replace")
-        doc = ""
-        m = re.search(r'"""(.*?)"""', src, re.S)
-        if m:
-            doc = " ".join(m.group(1).split())[:200]
-        actions = []
-        for verb in re.findall(r"util\.protontricks\(['\"](\w+)['\"]\)", src):
-            actions.append(f"winetricks {verb}")
-        for k, v in re.findall(r"util\.set_environment\(['\"]([\w_]+)['\"],\s*['\"]([^'\"]*)['\"]", src):
-            actions.append(f"env {k}={v}")
-        out = {"exists": True, "summary": doc, "actions": actions[:6],
-               "url": f"https://github.com/Open-Wine-Components/umu-protonfixes/blob/main/gamefixes-steam/{appid}.py"}
-    except urllib.error.HTTPError:
-        out = {"exists": False}
-    except Exception:
-        out = None
-    state.setdefault("umufix", {})[str(appid)] = {"ts": time.time(), "data": out}
-    save_state(state)
-    return out
-
-
-def auto_tune(root, appid):
-    games = {g["appid"]: g for g in list_games(root)}
-    g = games.get(str(appid))
-    if not g:
-        raise RuntimeError("game not found")
-    rules = load_tuning_rules()
-    det = detect_engine(g["install_path"])
-    env = dict(rules.get("base_env", {}))
-    wrappers = list(rules.get("base_wrappers", []))
-    notes = []
-    reasons = [f"Engine: {det['engine'] or 'unknown'}"
-               + (f" ({'DX12' if det['dx12'] else 'DX11'})" if det["dx12"] is not None else "")]
-    eng = rules.get("engines", {}).get(det["engine"] or "", {})
-    env.update(eng.get("env", {}))
-    notes += eng.get("notes", [])
-    vram = gpu_vram_mb()
-    cap_applied = False
-    name = g["name"].lower()
-    handheld = is_handheld()
-    for ov in rules.get("name_overrides", []):
-        if ov["match"] in name:
-            env.update(ov.get("env", {}))
-            if ov.get("desktop_env") and not handheld:
-                env.update(ov["desktop_env"])
-                reasons.append("Desktop detected — anti-handheld-preset flags "
-                               "applied (" + " ".join(f"{k}={v}" for k, v
-                               in ov["desktop_env"].items()) + ")")
-            notes += ov.get("notes", [])
-            reasons.append(f"Known-game profile matched: '{ov['match']}'")
-            if ov.get("vram_cap") and vram and vram <= rules.get("vram_cap_below_mb", 12000):
-                env["DXVK_CONFIG"] = f"dxgi.maxDeviceMemory={max(2048, vram - 1024)}"
-                cap_applied = True
-    if not cap_applied and vram and vram <= 8500:
-        env["DXVK_CONFIG"] = f"dxgi.maxDeviceMemory={max(2048, vram - 1024)}"
-        reasons.append(f"{vram} MB VRAM detected — headroom cap applied to "
-                       "prevent eviction stutter")
-    pdb = protondb_summary(appid)
-    umu = umu_fix_info(appid)
-    deck = deck_verified(appid)
-    if deck and pdb and pdb.get("tier"):
-        good_pdb = pdb["tier"] in ("platinum", "gold")
-        good_deck = deck.get("code") in (2, 3)
-        if good_pdb == good_deck:
-            reasons.append(f"Sources agree: ProtonDB {pdb['tier']} + "
-                           f"Valve Deck report '{deck['category']}' — "
-                           "community data corroborated")
-        else:
-            reasons.append(f"Sources disagree: ProtonDB says {pdb['tier']} "
-                           f"but Valve's Deck report says {deck['category']} — "
-                           "treat community launch-option tips with caution")
-    if umu and umu.get("exists"):
-        reasons.append("Community fix exists in umu-protonfixes — select "
-                       "GE-Proton in the compatibility dropdown and it applies "
-                       "automatically")
-    if pdb and pdb.get("tier"):
-        reasons.append(f"ProtonDB: {pdb['tier']} "
-                       f"({pdb.get('total', '?')} reports)")
-    parts = [f"{k}={v}" for k, v in env.items()] + wrappers + ["%command%"]
-    return {
-        "detection": det,
-        "protondb": pdb,
-        "umu_fix": umu,
-        "deck_verified": deck,
-        "handheld": handheld,
-        "launch_string": " ".join(parts),
-        "reasons": reasons + det["evidence"],
-        "notes": notes,
-        "vram_mb": vram,
-    }
-
-
-# --------------------------------------------------------------------------
-# Compatibility tools (Proton version per game)
-# --------------------------------------------------------------------------
-OFFICIAL_COMPAT_TOOLS = [
+OMPAT_TOOLS = [
     ("", "Steam default"),
     ("proton_experimental", "Proton Experimental"),
     ("proton_hotfix", "Proton Hotfix"),
@@ -1661,24 +1351,118 @@ OFFICIAL_COMPAT_TOOLS = [
 ]
 
 
-def list_compat_tools(root):
-    """Official Protons plus everything in every compatibilitytools.d that
-    Steam scans — including system packages (CachyOS installs proton-cachyos
-    to /usr/share/steam/compatibilitytools.d) and STEAM_EXTRA_COMPAT_TOOLS_PATHS."""
-    tools = [{"name": n, "label": l, "custom": False}
-             for n, l in OFFICIAL_COMPAT_TOOLS]
-    seen = {t["name"] for t in tools}
-    dirs = [
-        root / "compatibilitytools.d",
-        Path.home() / ".steam/root/compatibilitytools.d",
-        Path("/usr/share/steam/compatibilitytools.d"),
-        Path("/usr/local/share/steam/compatibilitytools.d"),
-    ]
+# --------------------------------------------------------------------------
+# Per-build environment variable support
+# --------------------------------------------------------------------------
+# Proton builds differ in what they understand. GE-Proton11-1 reads 29 vars
+# that Valve's Proton 11.0 has never heard of (PROTON_ENABLE_WAYLAND and
+# DXVK_HDR among them), so a launch string that's correct under GE can be
+# silently inert under Valve's build.
+#
+# Each build ships its launcher as a plain Python script, so the variables it
+# reads can just be scanned out of it. That's local, offline, and needs no
+# hardcoded table to go stale as builds move on.
+#
+# The catch: the scan can only see what the *script* reads. Variables consumed
+# further down the stack are invisible to it - DXVK_NVAPI_VKREFLEX is read by
+# the dxvk-nvapi DLL and appears in no proton script, yet works fine. Treating
+# "not found" as "unsupported" would wrongly disable it.
+#
+# So absence is only meaningful for a variable we can demonstrably detect
+# elsewhere. The union across every installed build is our evidence of what the
+# technique can see; anything outside that union we simply don't know about, and
+# unknown must mean "leave it alone" rather than "disable it".
+PROTON_ENV_RE = re.compile(
+    r"\b((?:PROTON|DXVK|VKD3D|WINE|WINEALSA|WINEDLL|MANGOHUD)_[A-Z0-9_]{2,})\b")
+
+
+def proton_env_vars(tool_dir: Path) -> set:
+    """Environment variables a build's launcher script reads."""
+    script = Path(tool_dir) / "proton"
+    if not script.is_file():
+        return set()
+    try:
+        return set(PROTON_ENV_RE.findall(script.read_text(errors="replace")))
+    except OSError:
+        return set()
+
+
+def _official_slug(dir_name: str):
+    """Steam's internal name for an official Proton build directory.
+
+    Steam uses a slug for its own builds but the plain directory name for
+    custom ones, which is why no single rule ever matched both. Verified
+    against a real CompatToolMapping in config.vdf:
+        "Proton 11.0"           -> proton_11
+        "Proton - Experimental" -> proton_experimental
+        "Proton Hotfix"         -> proton_hotfix
+        "GE-Proton11-1"         -> GE-Proton11-1   (custom: name as-is)
+
+    Returns None for anything not matching a confirmed pattern. That's
+    deliberate: emitting a guessed slug would write a name Steam doesn't
+    recognise and silently break the game's Proton setting, which is worse
+    than leaving the build out of the list.
+    """
+    n = " ".join(dir_name.split()).lower()
+    if n in ("proton - experimental", "proton experimental"):
+        return "proton_experimental"
+    if n == "proton hotfix":
+        return "proton_hotfix"
+    m = re.fullmatch(r"proton (\d+)\.0", n)
+    return "proton_" + m.group(1) if m else None
+
+
+def _custom_tool_name(tool_dir: Path):
+    """A custom tool's internal name + label, as declared in its own
+    compatibilitytool.vdf. Custom builds are authoritative about their name -
+    only the official ones need a slug derived."""
+    vdf = tool_dir / "compatibilitytool.vdf"
+    if not vdf.is_file():
+        return None
+    try:
+        data = vdf_parse(vdf.read_text(errors="replace"))
+        compat = ci_get(data, "compatibilitytools") or {}
+        compat = ci_get(compat, "compat_tools") or {}
+        for internal, meta in compat.items():
+            label = (meta.get("display_name", internal)
+                     if isinstance(meta, dict) else internal)
+            return internal, label
+    except Exception:
+        pass
+    return None
+
+
+def _compat_dirs(root: Path):
+    """Every compatibilitytools.d Steam scans, including system packages
+    (CachyOS installs proton-cachyos to /usr/share/steam/compatibilitytools.d)
+    and STEAM_EXTRA_COMPAT_TOOLS_PATHS."""
+    dirs = [root / "compatibilitytools.d",
+            Path.home() / ".steam/root/compatibilitytools.d",
+            Path("/usr/share/steam/compatibilitytools.d"),
+            Path("/usr/local/share/steam/compatibilitytools.d")]
     for extra in os.environ.get("STEAM_EXTRA_COMPAT_TOOLS_PATHS", "").split(":"):
         if extra:
             dirs.append(Path(extra))
+    return dirs
+
+
+def _tool_dirs(root: Path) -> dict:
+    """Installed builds, keyed by the name Steam uses in CompatToolMapping.
+
+    Keying on the Steam name (not the directory) means capability lookups are
+    an exact match against what the compat selector holds, instead of the
+    fuzzy label matching that quietly matched nothing.
+    """
+    out = {}
+    common = root / "steamapps/common"
+    if common.is_dir():
+        for sub in sorted(common.iterdir()):
+            if (sub / "proton").is_file():
+                slug = _official_slug(sub.name)
+                if slug:
+                    out[slug] = sub
     scanned = set()
-    for d in dirs:
+    for d in _compat_dirs(root):
         try:
             rd = d.resolve()
         except OSError:
@@ -1686,27 +1470,75 @@ def list_compat_tools(root):
         if rd in scanned or not d.is_dir():
             continue
         scanned.add(rd)
-        for tool_dir in sorted(d.iterdir()):
-            vdf = tool_dir / "compatibilitytool.vdf"
-            if not vdf.is_file():
+        for sub in sorted(d.iterdir()):
+            if not (sub / "proton").is_file():
                 continue
-            try:
-                data = vdf_parse(vdf.read_text(errors="replace"))
-                compat = ci_get(data, "compatibilitytools") or {}
-                compat = ci_get(compat, "compat_tools") or {}
-                for internal, meta in compat.items():
-                    if internal not in seen:
-                        seen.add(internal)
-                        label = meta.get("display_name", internal) \
-                            if isinstance(meta, dict) else internal
-                        tools.append({"name": internal, "label": label,
-                                      "custom": True})
-            except Exception:
+            found = _custom_tool_name(sub)
+            out[found[0] if found else sub.name] = sub
+    return out
+
+
+def proton_capabilities(root: Path) -> dict:
+    """Which env vars each installed build supports, and how sure we are.
+
+    `known` is the union over all builds: the vars this scan can actually see.
+    A var in `known` but missing from a build is genuinely unsupported there.
+    A var outside `known` is invisible to us, not absent - callers must leave
+    those enabled.
+    """
+    per_tool = {name: sorted(proton_env_vars(d))
+                for name, d in _tool_dirs(root).items()}
+    known = sorted(set().union(*(set(v) for v in per_tool.values()))
+                   if per_tool else [])
+    return {"tools": per_tool, "known": known}
+
+
+def list_compat_tools(root: Path):
+    """Only builds actually present on disk.
+
+    The old hardcoded list offered proton_9 and proton_10 whether or not they
+    existed, and stopped at 10 - so a real Proton 11.0 install couldn't be
+    selected at all, while two builds that weren't installed could be. Reading
+    the disk fixes the phantoms and the staleness together, and means new
+    Proton releases appear on their own.
+    """
+    tools = [{"name": "", "label": "Steam default", "custom": False}]
+    common = root / "steamapps/common"
+    if common.is_dir():
+        for sub in sorted(common.iterdir()):
+            if not (sub / "proton").is_file():
                 continue
+            slug = _official_slug(sub.name)
+            if slug:
+                tools.append({"name": slug, "label": sub.name, "custom": False})
+    seen = {t["name"] for t in tools}
+    scanned = set()
+    for d in _compat_dirs(root):
+        try:
+            rd = d.resolve()
+        except OSError:
+            continue
+        if rd in scanned or not d.is_dir():
+            continue
+        scanned.add(rd)
+        for sub in sorted(d.iterdir()):
+            # Deliberately NOT requiring a "proton" script here: not every
+            # Steam compat tool is Proton (Luxtorpeda, Boxtron and friends
+            # declare a compatibilitytool.vdf and have no proton script), and
+            # demanding one would drop them from the selector entirely. Only
+            # the capability scan needs the script.
+            found = _custom_tool_name(sub)
+            if not found:
+                continue
+            name, label = found
+            if name in seen:
+                continue
+            seen.add(name)
+            tools.append({"name": name, "label": label, "custom": True})
     return tools
 
 
-def _config_vdf(root):
+def _config_vdf(root: Path):
     return root / "config/config.vdf"
 
 
@@ -1728,7 +1560,7 @@ def _compat_mapping_node(data, create=False):
             else ci_get(steam, "CompatToolMapping"))
 
 
-def get_compat_tool(root, appid):
+def get_compat_tool(root: Path, appid: str) -> dict:
     cfg = _config_vdf(root)
     if not cfg.is_file():
         return {"name": "", "source": None}
@@ -1743,7 +1575,7 @@ def get_compat_tool(root, appid):
     return {"name": "", "source": str(cfg)}
 
 
-def set_compat_tool(root, appid, tool_name, close_steam=False):
+def set_compat_tool(root: Path, appid: str, tool_name, close_steam=False) -> dict:
     if steam_running():
         if close_steam:
             shutdown_steam()
@@ -1773,7 +1605,7 @@ def set_compat_tool(root, appid, tool_name, close_steam=False):
 # --------------------------------------------------------------------------
 # Full library (owned games) via Steam Web API
 # --------------------------------------------------------------------------
-def steamid64(root):
+def steamid64(root: Path):
     """Most recent login from loginusers.vdf; falls back to config.vdf."""
     lu = root / "config/loginusers.vdf"
     try:
@@ -1793,7 +1625,7 @@ def steamid64(root):
     return None
 
 
-def owned_games(root, force=False):
+def owned_games(root: Path, force=False):
     key = load_config().get("steam_api_key", "").strip()
     if not key:
         raise RuntimeError("No Steam Web API key set — add one in settings "
@@ -1821,7 +1653,7 @@ def owned_games(root, force=False):
 
 
 
-def install_progress(root):
+def install_progress(root: Path):
     """Cheap poll: manifest-only install state for every game."""
     out = []
     for g in list_games(root):
@@ -1836,7 +1668,7 @@ def install_progress(root):
     return out
 
 
-def install_game(appid):
+def install_game(appid: str):
     exe = shutil.which("steam")
     if not exe:
         raise RuntimeError("'steam' command not found in PATH")
@@ -1850,7 +1682,7 @@ BENCH_DIR = DATA_DIR / "benchmarks"
 BENCH_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def benchmark_launch_string(appid):
+def benchmark_launch_string(appid: str):
     folder = BENCH_DIR / str(appid)
     folder.mkdir(parents=True, exist_ok=True)  # MangoHud won't create it
     cfg = (f"output_folder={folder},autostart_log=1,log_duration=300,"
@@ -1913,7 +1745,7 @@ def _parse_mangohud_csv(path):
     return frametimes
 
 
-def _analyse_frametimes(ft):
+def _analyse_frametimes(ft) -> dict | None:
     n = len(ft)
     if n == 0:
         return None
@@ -1947,7 +1779,7 @@ def _downsample(series, target=200):
     return out
 
 
-def get_benchmark_data(root, appid):
+def get_benchmark_data(root: Path, appid: str):
     folder = BENCH_DIR / str(appid)
     result = {
         "has_mangohud": shutil.which("mangohud") is not None,
@@ -2011,7 +1843,7 @@ def get_benchmark_data(root, appid):
 # Shader cache
 # --------------------------------------------------------------------------
 
-def cache_info(root, appid):
+def cache_info(root: Path, appid: str):
     out = []
     for lib in library_folders(root):
         c = lib / "shadercache" / str(appid)
@@ -2030,9 +1862,9 @@ def cache_info(root, appid):
     return out
 
 
-def clear_cache(root, appid, keep_recordings=True):
+def clear_cache(root: Path, appid: str, keep_recordings=True) -> dict:
     """Default clears COMPILED artifacts but preserves fozpipelinesv6/
-    recordings — Steam's source data for its shader pass, costly to
+    recordings - Steam's source data for its shader pass, costly to
     regenerate. keep_recordings=False deletes everything."""
     cleared, kept = [], 0
     for entry in cache_info(root, appid):
@@ -2050,7 +1882,6 @@ def clear_cache(root, appid, keep_recordings=True):
             else:
                 child.unlink(missing_ok=True)
             cleared.append(str(child))
-    unmark_compiled(appid)
     return {"cleared": cleared, "kept_recordings": kept}
 
 
@@ -2060,7 +1891,7 @@ def clear_cache(root, appid, keep_recordings=True):
 SHADER_KEY_RE = re.compile(r"shader|fossilize|precach", re.I)
 
 
-def _walk_vdf(node, prefix=()):
+def _walk_vdf(node, prefix=()) -> None:
     for k, v in (node or {}).items():
         if isinstance(v, dict):
             yield from _walk_vdf(v, prefix + (k,))
@@ -2100,11 +1931,11 @@ def recommended_shader_threads():
     return max(1, logical_cores() - SHADER_THREADS_RESERVE)
 
 
-def steam_dev_cfg(root):
+def steam_dev_cfg(root: Path):
     return Path(root) / "steam_dev.cfg"
 
 
-def get_shader_threads(root):
+def get_shader_threads(root: Path) -> int | None:
     """Current override, or None if unset (i.e. Steam's own default applies)."""
     cfg = steam_dev_cfg(root)
     if not cfg.is_file():
@@ -2119,7 +1950,7 @@ def get_shader_threads(root):
     return None
 
 
-def set_shader_threads(root, threads):
+def set_shader_threads(root: Path, threads) -> dict:
     """Write the override, creating steam_dev.cfg if absent and preserving any
     other lines already in it. Pass threads=None to remove the override."""
     cores = logical_cores()
@@ -2145,7 +1976,7 @@ def set_shader_threads(root, threads):
             "restart_required": True}
 
 
-def shader_threads_status(root):
+def shader_threads_status(root: Path) -> dict:
     return {"current": get_shader_threads(root),
             "cores": logical_cores(),
             "recommended": recommended_shader_threads(),
@@ -2154,7 +1985,7 @@ def shader_threads_status(root):
             "exists": steam_dev_cfg(root).is_file()}
 
 
-def steam_shader_settings(root):
+def steam_shader_settings(root: Path) -> dict:
     """Find every shader-related key Steam has written, across its configs.
     Steam only persists these once you've touched them, so an empty result
     means 'still at defaults'."""
@@ -2175,7 +2006,7 @@ def steam_shader_settings(root):
     return {"files": out, "found": bool(out)}
 
 
-def set_steam_shader_setting(root, file, path, value, close_steam=False):
+def set_steam_shader_setting(root: Path, file, path, value, close_steam=False) -> dict:
     cfg = Path(file)
     if cfg.name not in ("config.vdf", "localconfig.vdf") or not cfg.is_file():
         raise RuntimeError("refusing to write an unexpected file")
@@ -2369,7 +2200,7 @@ def _drm_gpus():
     return out
 
 
-def detect_hardware():
+def detect_hardware() -> dict:
     gpus = _nvidia_gpus() + _drm_gpus()
     return {
         "cpu": cpu_name(),
@@ -2489,7 +2320,7 @@ def mangohud_config(preset="reference", hw=None, pin_gpu=None,
     return "\n".join(lines) + "\n"
 
 
-def apply_mangohud_config(preset="reference", pin_gpu=None, log_dir=None):
+def apply_mangohud_config(preset="reference", pin_gpu=None, log_dir=None) -> dict:
     MANGOHUD_DIR.mkdir(parents=True, exist_ok=True)
     dest = MANGOHUD_DIR / "MangoHud.conf"
     backup = None
@@ -2508,12 +2339,12 @@ def apply_mangohud_config(preset="reference", pin_gpu=None, log_dir=None):
 # --------------------------------------------------------------------------
 # Game Mode (CachyOS Handheld / gamescope session)
 # --------------------------------------------------------------------------
-def detect_display_mode():
+def detect_display_mode() -> dict | None:
     """Best-effort current resolution + refresh rate for auto-filling the
     gamescope command. On KDE Wayland, kscreen-doctor reports the active mode
     (marked with '*'). Falls back to /sys/class/drm modes for resolution and a
     sane 60 Hz default. Returns {'width','height','refresh'} or None."""
-    # 1) kscreen-doctor (KDE Wayland) — has both res AND refresh.
+    # 1) kscreen-doctor (KDE Wayland) - has both res AND refresh.
     # It's a Qt GUI app: with no reachable display it does NOT fail politely,
     # it qFatal()s and dumps core. The backend runs as a systemd user service
     # and so may have no WAYLAND_DISPLAY of its own, in which case Qt falls
@@ -2553,7 +2384,7 @@ def detect_display_mode():
     return None
 
 
-def game_mode_available():
+def game_mode_available() -> dict:
     """Detect whether a gamescope Game Mode session can be launched. CachyOS
     Handheld ships steamos-session-select plus a gamescope session file."""
     switcher = shutil.which("steamos-session-select")
@@ -2566,9 +2397,9 @@ def game_mode_available():
             "has_session": session}
 
 
-def launch_game_mode():
+def launch_game_mode() -> dict:
     """Switch to the gamescope Game Mode session. NOTE: this ends the desktop
-    session, so it also terminates this backend and the browser tab — it's a
+    session, so it also terminates this backend and the browser tab - it's a
     one-way switch. Return before the session actually tears down so the API
     call can respond."""
     info = game_mode_available()
@@ -2586,9 +2417,9 @@ def launch_game_mode():
 
 
 # --------------------------------------------------------------------------
-# Backup / restore — export and re-import PCC's own data (survives reinstalls)
+# Backup / restore - export and re-import PCC's own data (survives reinstalls)
 # --------------------------------------------------------------------------
-def export_backup(dest_dir=None):
+def export_backup(dest_dir=None) -> dict:
     """Bundle PCC's data (DLL library, backups, state, config/API keys,
     MangoHud config) into a single .tar.gz the user can keep and re-import
     after an OS reinstall. Returns the archive path."""
@@ -2609,7 +2440,7 @@ def export_backup(dest_dir=None):
     return {"archive": str(archive), "size": archive.stat().st_size}
 
 
-def restore_backup(archive_path):
+def restore_backup(archive_path) -> dict:
     """Restore a PCC backup archive produced by export_backup. Existing data is
     overwritten by the archive's contents; anything not in the archive is left
     alone. MangoHud config is restored to its standard location."""
@@ -2661,7 +2492,7 @@ def _installed_ge_versions():
     return out
 
 
-def list_ge_proton(limit=10):
+def list_ge_proton(limit=10) -> dict:
     """List recent GE-Proton releases from GitHub with an 'installed' flag.
     Cached 6h. This is the 'what's available / am I up to date' view."""
     state = load_state()
@@ -2679,7 +2510,7 @@ def list_ge_proton(limit=10):
             # GE-Proton 11+ ships both x86_64 and aarch64 (ARM) tarballs.
             # The x86_64 asset is named like "GE-Proton11-1.tar.gz" (no arch
             # suffix); ARM is "GE-Proton11-1-aarch64.tar.gz". Pick x86_64 and
-            # never the ARM build (which breaks on x64 — see GE issue #569).
+            # never the ARM build (which breaks on x64 - see GE issue #569).
             def _is_x86(a):
                 n = a.get("name", "")
                 return (n.endswith(".tar.gz")
@@ -2708,7 +2539,7 @@ def list_ge_proton(limit=10):
             "installed": sorted(installed)}
 
 
-def install_ge_proton(task_id, url, tag):
+def install_ge_proton(task_id, url, tag) -> None:
     """Download a GE-Proton tarball and extract it into the user
     compatibilitytools.d. Steam picks it up on next launch."""
     import tarfile, io
@@ -2791,12 +2622,6 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 dlss_seen = state.get("dlss_seen", {})
                 for g in games:
-                    try:
-                        st = compiled_status(root, g["appid"], state, drv)
-                        g["compiled"] = st["compiled"]
-                        g["outdated"] = st.get("outdated", False)
-                    except Exception:
-                        g["compiled"] = g["outdated"] = False
                     g["has_launch_options"] = g["appid"] in lo_appids
                     g["has_cache"] = any(
                         (Path(lib) / "shadercache" / g["appid"]).is_dir()
@@ -2839,13 +2664,14 @@ class Handler(BaseHTTPRequestHandler):
                 hw = detect_hardware()
                 self._json({"hardware": hw, "preset": preset,
                             "preview": mangohud_config(preset, hw)})
+            elif self.path == "/api/proton_capabilities":
+                self._json(proton_capabilities(root))
             elif self.path == "/api/compat_tools":
                 self._json({"tools": list_compat_tools(root)})
             elif m := re.match(r"^/api/game/(\d+)/compat_tool$", self.path):
                 self._json(get_compat_tool(root, m.group(1)))
             elif m := re.match(r"^/api/game/(\d+)/cache$", self.path):
-                self._json({"caches": cache_info(root, m.group(1)),
-                            "status": compiled_status(root, m.group(1))})
+                self._json({"caches": cache_info(root, m.group(1))})
             elif m := re.match(r"^/api/game/(\d+)/protondb(?:\?(.*))?$", self.path):
                 qs = urllib.parse.parse_qs(m.group(2) or "")
                 if qs.get("cached"):
@@ -2853,8 +2679,6 @@ class Handler(BaseHTTPRequestHandler):
                                                                "cached": True})
                 else:
                     self._json(protondb_summary(m.group(1)) or {"tier": None})
-            elif m := re.match(r"^/api/game/(\d+)/autotune$", self.path):
-                self._json(auto_tune(root, m.group(1)))
             elif m := re.match(r"^/api/game/(\d+)/benchmark$", self.path):
                 self._json(get_benchmark_data(root, m.group(1)))
             elif m := re.match(r"^/api/owned(?:\?(.*))?$", self.path):
@@ -2996,7 +2820,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(e)}, 500)
 
 
-def main():
+def main() -> None:
     root = steam_root()
     print(f"Proton Command Center  ->  http://localhost:{PORT}")
     print(f"Steam root: {root or 'NOT FOUND'}")
