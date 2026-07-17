@@ -1,23 +1,63 @@
 # Proton Command Center
 
-A local web app for managing your Steam library on Linux without digging
-through Steam's UI: per-game launch options, Proton version selection, DLSS
-DLL management with one-click updates, shader cache management,
-MangoHud overlay configuration and before/after benchmarks, full controller
-navigation, a ProtonDB
-rating check, and a full owned-library view with one-click installs. Built
-for Arch-based distros (CachyOS, EndeavourOS, vanilla Arch) with an NVIDIA
-slant, though nothing Arch-specific is required beyond the install scripts.
+Steam on Linux hides the settings that matter. Launch options are a single-line
+text box. Proton versions are a dropdown with no idea what each build supports.
+DLSS DLLs mean hunting through game folders. Shader processing crawls because
+Steam quietly uses a quarter of your cores.
 
-Runs entirely on your machine at `http://localhost:8686`. Python standard
-library only — no dependencies to install.
+This puts all of it in one place, in your browser, on your machine.
+
+```
+http://localhost:8686
+```
+
+Python standard library only. No dependencies, no telemetry, no account.
+
+---
+
+## What it does
+
+**Builds launch options with toggles instead of guesswork.** Pick from DXVK,
+gamescope, HDR, Wayland, Reflex and the rest. Each one says what it does and
+what it costs.
+
+**Knows what your Proton build actually supports.** GE-Proton 11-1 reads 90
+environment variables. Valve's Proton 11.0 reads 60. Set a GE-only option on a
+Valve build and it does nothing, silently. Command Center scans each installed
+build and greys out what won't work, so you can't ship dead options.
+
+**Manages DLSS DLLs.** Every DLL in the game with its version, one-click
+upgrade, backups you can roll back.
+
+**Fixes Steam's shader processing.** Steam defaults to a fraction of your cores
+for the "Processing Vulkan shaders" pass. The setting isn't in Steam's UI at
+all - it lives in a file Steam doesn't even create. One click sets it to every
+core but two.
+
+**Shows where your disk went.** NVIDIA's shader cache and Steam's own, with
+per-game breakdowns and clear-out buttons.
+
+**Benchmarks before and after.** MangoHud logs split at the change, compared on
+avg FPS, 1% and 0.1% lows, and stutter count.
+
+**Works from the sofa.** Full controller navigation, fullscreen, and a hint bar
+with the mapping.
+
+**Shows your whole library.** Owned games you haven't installed appear greyed,
+with an Install button and live progress.
+
+---
 
 ## Requirements
 
-- Python 3 (`sudo pacman -S python`) — the only hard dependency
-- Steam, installed and logged in at least once
-- Optional: `mangohud` (overlay + benchmarks), an NVIDIA driver (DLSS
-  features, shader cache management)
+| | |
+|---|---|
+| **Required** | Python 3, Steam (logged in once) |
+| **Optional** | `mangohud` for the overlay and benchmarks |
+| **Optional** | An NVIDIA driver for DLSS and shader cache features |
+
+Built and tested on Arch-based distros with an NVIDIA slant. Nothing is
+Arch-specific beyond the install script.
 
 ## Install
 
@@ -27,207 +67,160 @@ cd proton-command-center
 ./install.sh
 ```
 
-Installs to `~/.local/share/proton-command-center`, adds a launcher and an
-app-menu entry, and sets up a **systemd user service** that runs the backend
-from login and restarts it if it dies. Open it from the app menu, run
-`proton-command-center`, or browse to **http://localhost:8686**.
+Or from the AUR:
 
-Prefer a real package? `makepkg -si` with the included PKGBUILD, then
-`systemctl --user enable --now proton-command-center`.
+```bash
+yay -S proton-command-center
+systemctl --user enable --now proton-command-center
+```
 
-## Optional API keys
+Either way you get a launcher, an app-menu entry, and a systemd user service
+that starts at login and restarts itself if it dies.
 
-Click the **gear icon** (top right):
+## Two optional keys
 
-1. **SteamGridDB key** — artwork for games Steam's CDN doesn't cover (betas,
-   demos, delisted titles). Free at [steamgriddb.com](https://www.steamgriddb.com)
-   → Profile → Preferences → API.
-2. **Steam Web API key** — the full owned-library view: every game you own,
-   uninstalled ones greyed out with an Install button. Free at
-   [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey).
-   Your SteamID is detected automatically.
+Both free, both stored locally in `config.json` (mode 0600), both used only
+server-side. Skip them and everything else still works.
 
-Both are stored locally in `config.json` (permissions 0600), used only
-server-side. Skip them and everything else still works — you just get
-CDN-only art and installed games only.
+- **[SteamGridDB](https://www.steamgriddb.com)** - artwork for games Steam's CDN
+  misses: betas, demos, delisted titles.
+- **[Steam Web API](https://steamcommunity.com/dev/apikey)** - your full owned
+  library, not just what's installed. Your SteamID is detected automatically.
 
-## Using it
+---
 
-The grid shows your games with a status rail on each card: launch options
-set, DLSS detected, shader cache present. Hover for
-**▶ Play** (launches through Steam). Greyed cards are owned but not
-installed — click to install, with live progress on the card. Click an
-installed game to open its panel.
+## The details
 
-**Launch tab** — pick a compatibility tool (official Proton builds, GE-Proton,
-Proton-CachyOS and anything else in `compatibilitytools.d` are read from disk,
-so only builds you actually have are offered and new releases appear on their
-own), then build the launch string with
-toggles: native Wayland, HDR, MangoHud, game-performance, and Steam Deck
-spoof on/off. Full DLSS controls sit below: Super Resolution modes with
-custom ratio and transformer presets, Frame Generation, Ray Reconstruction,
-and a frame-rate cap. **One Save** writes the Proton version and launch
-string together, closing Steam cleanly first (it would otherwise overwrite
-the change on exit) with a timestamped backup next to `localconfig.vdf`.
+### Launch tab
 
-**Per-build option validation** — Proton builds don't all understand the same
-environment variables. GE-Proton11-1 reads 29 that Valve's Proton 11.0 has never
-heard of, `PROTON_ENABLE_WAYLAND` and `PROTON_ENABLE_HDR` among them, so a
-launch string that works under GE can be silently inert under Valve's build.
-Command Center scans each installed build's launcher script for the variables it
-actually reads, and greys out any toggle the selected build can't act on,
-telling you which variable is missing.
+Compatibility tools are read from disk, so only builds you actually have are
+offered, and new releases show up on their own. Toggles cover DXVK, gamescope,
+HDR, native Wayland, Reflex, esync, and GE-only extras like D7VK and OptiScaler.
 
-It only greys out what it can prove. The scan sees what the launcher script
-reads; variables consumed further down the stack are invisible to it -
-`DXVK_NVAPI_VKREFLEX` is read by the dxvk-nvapi DLL and appears in no proton
-script at all, yet works fine. So absence only counts for a variable the scan
-demonstrably detects in some other installed build. Anything it has never seen
-stays enabled, because unknown is not the same as unsupported.
+Options that the selected build can't act on are greyed out with the reason. The
+check only greys what it can prove: it scans each build's launcher script, and a
+variable it has never seen in *any* build stays enabled, because unknown isn't
+the same as unsupported. (`DXVK_NVAPI_VKREFLEX` is read by dxvk-nvapi itself and
+appears in no proton script, yet works fine.)
 
-**🔍 ProtonDB check** — fetches the game's community rating and shows a
-coloured tier badge with a star score. Click the badge to open the game's
-ProtonDB page. Once checked, the badge persists across restarts.
+Saving needs Steam closed - it rewrites `localconfig.vdf` on exit and would
+clobber the change. Confirm and it closes Steam cleanly, saves, and offers a
+one-click restart.
 
-**DLSS tab** — each DLSS DLL in the game with its version. The three buttons
-fetch the latest Super Resolution, Frame Generation, and Ray Reconstruction
-DLLs into your local library, sourced from the DLSS Swapper manifest (the
-same version-tracked source that tool uses). An **update available** chip
-appears when a game's DLL is behind your library's newest. Originals are
-backed up before any swap; Restore is one click. Restore originals before
-playing anti-cheat titles that enforce file integrity.
+### DLSS tab
 
-**Shader cache tab** — sets how many CPU threads Steam uses for its
-"Processing Vulkan shaders" pass. Steam only uses a fraction of your cores by
-default, which is why that screen can crawl on an otherwise idle machine; the
-override lives in `steam_dev.cfg`, a file Steam never creates and exposes
-nowhere in its UI. One click sets it to every core but two (leaving headroom so
-the desktop stays usable), and Steam needs a full restart to pick it up.
+Every DLSS DLL in the game with its version. Swap in a newer one from your
+library, back up the original, roll back whenever. Requires an NVIDIA driver.
 
-A global toggle writes the NVIDIA shader-disk-cache
-environment variables to `/etc/environment`, consolidating the driver's
-compiled shaders into one capped location that survives cleanup (this is the
-part that meaningfully reduces in-game shader stutter). Shows cache sizes per
-game, with clear-cache and delete-everything actions.
+### Shader cache tab
 
-Command Center does **not** try to pre-empt Steam's own "Processing Vulkan
-shaders" pass. Steam replays its `.foz` pipeline caches into its own database
-and gates on its own ledger, so nothing outside Steam can convince it to skip
-that work. If the processing screen bothers you, the real switch is Steam →
-Settings → Downloads → Shader Pre-Caching → untick *Allow background
-processing of Vulkan shaders* — the trade-off being that shaders then compile
-during play, causing brief first-encounter stutter.
+The headline number is what NVIDIA's shader cache is using against its ceiling,
+plus what Steam is holding separately - usually far more.
 
-**System & MangoHud panel** (🖥 button) — detects and names your CPU and
-GPU(s), reads VRAM, and generates a MangoHud config in a compact horizontal
-layout (orange labels, white values, frametime graph, pinned to the discrete
-GPU on hybrid laptops). Enabling the MangoHud launch toggle writes this
-config automatically on first use. Presets range from a minimal readout to a
-full benchmark overlay.
+**Thread count.** Steam uses only a fraction of your cores for its shader pass,
+which is why that screen can crawl on an idle machine. The override lives in
+`steam_dev.cfg`, a file Steam never creates and exposes nowhere in its UI. One
+click sets it to every core but two. Needs a full Steam restart.
 
-**Benchmark tab** — save the benchmark launch options, play, make a change,
-play again. Logs are split at the marked time and compared on avg FPS, 1% and
-0.1% lows, and stutter count, with frametime graphs.
+**Disk cache.** A global toggle writes NVIDIA's shader-disk-cache variables to
+`/etc/environment`, consolidating compiled shaders somewhere that survives
+cleanup. Needs a re-login: environment variables only reach processes started
+afterwards.
 
-**Controller navigation** — plug in a pad (Xbox, DualSense, Steam Deck) and the
-whole UI becomes navigable from the couch. A hint bar appears along the bottom
-with the mapping:
+Command Center does **not** try to pre-empt Steam's "Processing Vulkan shaders"
+pass. Steam replays its own pipeline caches and gates on its own ledger, so
+nothing outside Steam can make it skip that work. If it bothers you, the real
+switch is Steam → Settings → Downloads → Shader Pre-Caching, at the cost of
+shaders compiling during play instead.
+
+### Benchmark tab
+
+Save the benchmark launch options, play, change something, play again. Logs are
+split at the marked point and compared on avg FPS, 1% and 0.1% lows, and stutter
+count, with frametime graphs.
+
+### ProtonDB check
+
+Fetches the game's community rating and shows a tier badge. Persists across
+restarts.
+
+### System panel
+
+Names your CPU and GPU properly, and configures the MangoHud overlay: presets,
+which GPU to pin, logging.
+
+### Controller
 
 | Input | Action |
 |---|---|
-| **D-pad / left stick** | Move between cards and controls |
-| **A** | Select / activate |
-| **B** | Back — closes the drawer or settings |
-| **X** | Play (or Install) the focused game |
-| **Y** | Jump to search |
-| **LB / RB** | Cycle the drawer's tabs |
+| D-pad / stick | Move |
+| **A** | Select |
+| **B** | Back |
+| **X** | Play or Install |
+| **Y** | Search |
+| **LB / RB** | Cycle tabs |
 | **Start** | Settings |
-| **Select / Back** | Toggle fullscreen |
+| **Select** | Fullscreen |
 
-Navigation is spatial, so pressing down from a card lands on the card directly
-below rather than wandering diagonally; left/right at the end of a row wraps to
-the next one. A game card is a single stop — its Play/Install button isn't a
-separate target, and the focused card reveals its ▶ so you can see what **X**
-will act on. The pad drives real DOM focus, so keyboard navigation improves
-alongside it, and nothing runs until a pad is connected. Text fields still need
-a keyboard — in Game Mode, Steam's on-screen keyboard (**Steam + X**) covers it.
+Navigation is spatial, so down from a card lands on the card below rather than
+wandering diagonally. Cards are a single stop. Confirmations are drawn in-page,
+because a native browser dialog freezes the pad polling loop and can't be
+answered.
 
-Confirmation prompts are drawn in-page rather than using the browser's native
-`confirm()`, because a native dialog halts JavaScript — which freezes the pad
-polling loop and leaves the prompt literally unanswerable from a controller.
-Installing a game asks nothing at all: Steam opens its own install dialog, so a
-second confirmation was only ever confirming that you'd like to be asked.
+Fullscreen is also on ⛶ or **F11**; **Esc** always leaves. *Settings → Display →
+Open fullscreen* makes it automatic - it fires on your first click or button
+press, since browsers forbid a page going fullscreen on load.
 
-**Fullscreen** — the ⛶ header button (or **F11**, or **Select** on a pad)
-toggles fullscreen, and **Esc** always leaves it. *Settings → Display → Open
-fullscreen* makes it automatic. One caveat worth knowing: browsers forbid a page
-from going fullscreen on load without a user gesture, so it fires on your first
-click or controller button rather than the instant the page appears. That's a
-browser security rule, not a setting. Command Center deliberately doesn't launch
-your browser in `--kiosk` mode — that traps you (F11 won't exit, only Alt+F4)
-and silently does nothing if a browser window is already open.
+### Game Mode *(CachyOS only)*
 
-**🎮 Game Mode button** *(CachyOS only)* — appears in the header only on
-CachyOS Handheld / systems with `gamescope-session-cachyos` installed.
-Switches into the gamescope Game Mode session (the Steam Deck UI). Since this
-ends the desktop session, it also closes PCC and the browser tab — return to
-desktop from Steam's Power menu → Switch to Desktop. Hidden entirely on
-systems without the CachyOS handheld session.
+Appears when `steamos-session-select` exists. Switches to the Steam Deck UI.
 
-## Settings (gear icon)
+### Settings
 
-Beyond the optional API keys above, the Settings panel holds two occasional
-tools kept out of the main UI:
+**Backup & restore** - your DLL library, launch settings, MangoHud config, API
+keys and ProtonDB ratings into one timestamped `.tar.gz`. Art cache excluded; it
+re-fetches itself.
 
-**Backup & restore** — export your DLL library, launch settings, MangoHud
-config, API keys, and ProtonDB ratings to a single timestamped `.tar.gz`
-(saved to Downloads). After a reinstall, paste the archive path and Restore
-pulls it all back. The art cache is excluded (it re-fetches itself).
+**Proton versions** - recent GE-Proton releases with an up-to-date status and
+one-click install into `compatibilitytools.d`. On CachyOS, `proton-cachyos` from
+pacman is the better path since it's system-optimised.
 
-**Proton versions** — lists recent GE-Proton releases from GitHub with a
-clear "up to date" or "update available" status. Install any version with one
-click; it extracts into `~/.local/share/Steam/compatibilitytools.d/` and
-Steam picks it up on next restart. Already-installed versions are flagged.
-(Proton-CachyOS is installed through pacman — `proton-cachyos` — which is the
-better path on CachyOS since it's system-optimised.)
+---
 
 ## Updating
 
-Re-run `./install.sh` — it copies the new files and restarts in one go. If
-the UI shows a red banner, the backend is running older code than the
-frontend: `systemctl --user restart proton-command-center` and refresh.
+Re-run `./install.sh`, or `yay -S proton-command-center`. A red banner means the
+backend is older than the frontend: `systemctl --user restart
+proton-command-center` and refresh.
 
 ## Troubleshooting
 
-- **Missing artwork** — gear icon → "Clear art cache & re-fetch".
-- **Backend not responding** — `systemctl --user restart proton-command-center`.
-- **Save says Steam is running** — that's the auto-close flow: confirm, and
-  it shuts Steam down cleanly, saves, and offers a one-click restart.
-- **Shader env toggle needs a re-login** — `/etc/environment` changes only
-  apply to newly-started sessions.
+| Symptom | Fix |
+|---|---|
+| Missing artwork | Gear → Clear art cache & re-fetch |
+| Backend not responding | `systemctl --user restart proton-command-center` |
+| "Steam is running" on save | Expected - confirm and it closes Steam cleanly |
+| Shader toggle did nothing | Needs a re-login; `/etc/environment` only affects new sessions |
+| Thread count did nothing | Needs a full Steam restart, not just a reload |
 
 ## Uninstall
 
 ```bash
-./uninstall.sh           # interactive, asks before deleting user data
-./uninstall.sh --purge   # remove everything including user data
+./uninstall.sh           # asks before deleting user data
+./uninstall.sh --purge   # everything, including user data
 ```
 
-Removes the service, launcher, menu entry, and app files. User data (DLSS
-DLL library, DLL backups, compile state, art cache, API keys) is kept unless
-you purge — restore any swapped DLLs first if you do.
+Restore any swapped DLLs before purging.
 
 ## Development
-
-Single-file stdlib backend. Tests build a mock Steam install in a temp dir,
-so they run anywhere:
 
 ```bash
 python3 tests/test_pcc.py
 ```
 
-Run a second instance without touching your installed service:
-`PCC_PORT=8687 python3 pcc.py`. Games launched via Play run in their own
-systemd scope, so restarting the backend never kills a running game.
+Tests build a mock Steam install in a temp dir, so they run anywhere. A second
+instance won't disturb your service: `PCC_PORT=8687 python3 pcc.py`. Games
+launched via Play run in their own systemd scope, so restarting the backend
+never kills a running game.
 
-MIT licensed. Copyright (c) 2026 Marc Gibb.
+MIT. Copyright (c) 2026 Marc Gibb.
