@@ -154,7 +154,8 @@ which GPU to pin, logging.
 
 | Input | Action |
 |---|---|
-| D-pad / stick | Move |
+| D-pad / left stick | Move |
+| **Right stick** | Scroll long lists |
 | **A** | Select |
 | **B** | Back |
 | **X** | Play or Install |
@@ -164,9 +165,15 @@ which GPU to pin, logging.
 | **Select** | Fullscreen |
 
 Navigation is spatial, so down from a card lands on the card below rather than
-wandering diagonally. Cards are a single stop. Confirmations are drawn in-page,
+wandering diagonally. The right stick scrolls whatever surface is open - the
+settings panel, a drawer tab, the hardware readout. Cards are a single stop. Confirmations are drawn in-page,
 because a native browser dialog freezes the pad polling loop and can't be
 answered.
+
+Steam's own install dialog is outside all of this: it's a separate window, and
+a browser only receives gamepad input while it has focus. To drive Steam's UI
+with a pad, use Steam's Desktop Layout (Steam → Settings → Controller), which
+maps the controller to mouse and keyboard system-wide.
 
 Fullscreen is also on ⛶ or **F11**; **Esc** always leaves. *Settings → Display →
 Open fullscreen* makes it automatic - it fires on your first click or button

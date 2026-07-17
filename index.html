@@ -318,7 +318,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 <div id="gpHint">
   <span><b>✛</b> move</span><span><b class="a">A</b> select</span><span><b class="b">B</b> back</span>
   <span><b class="x">X</b> play</span><span><b>LB</b><b>RB</b> tabs</span>
-  <span><b>Y</b> search</span><span><b>☰</b> settings</span><span><b>⛶</b> fullscreen</span>
+  <span><b>Y</b> search</span><span><b>R</b> scroll</span><span><b>☰</b> settings</span><span><b>⛶</b> fullscreen</span>
 </div>
 <aside id="drawer" aria-label="Game settings">
   <div class="hero">
@@ -534,7 +534,7 @@ textarea{width:100%;min-height:84px;background:#0c1014;border:1px solid var(--li
 
 <script>
 "use strict";
-const FRONTEND_VERSION="1.15.0";
+const FRONTEND_VERSION="1.15.1";
 const $=s=>document.querySelector(s);
 const api=async(p,opts)=>{const r=await fetch(p,opts);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j};
 const post=(p,body)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
@@ -1105,6 +1105,25 @@ function closeDrawer(){$("#drawer").classList.remove("open");$("#overlay").class
     if(t)switchTab(t.dataset.tab);
   }
 
+  // The right stick scrolls whatever surface is actually scrollable, rather
+  // than moving focus. Long lists (GE-Proton releases, the hardware panel) were
+  // only reachable by nudging focus item-by-item and letting scrollIntoView
+  // drag the view along.
+  const SCROLL_DEAD=0.15, SCROLL_MAX=22;
+  function scrollSurface(){
+    if(confirmOpen())return null;
+    if(popOpen())return $("#settingsPop");
+    const hw=$("#hwBody");
+    if(hw&&hw.offsetParent!==null&&hw.closest(".open"))return hw;
+    if(drawerOpen())return document.querySelector(".pane.active");
+    return null;                       // fall through to the window
+  }
+  function padScroll(dy){
+    const el=scrollSurface();
+    if(el&&el.scrollHeight>el.clientHeight+2){el.scrollTop+=dy;return}
+    window.scrollBy(0,dy);
+  }
+
   function loop(){
     const gp=[...(navigator.getGamepads?navigator.getGamepads():[])].find(g=>g&&g.connected);
     if(gp){
@@ -1113,6 +1132,13 @@ function closeDrawer(){$("#drawer").classList.remove("open");$("#overlay").class
       const ax=gp.axes[0]||0, ay=gp.axes[1]||0;
       const dir = (b[12]||ay<-DEAD)?"up" : (b[13]||ay>DEAD)?"down"
                 : (b[14]||ax<-DEAD)?"left" : (b[15]||ax>DEAD)?"right" : null;
+      // right stick = free scrolling, every frame so it feels analogue rather
+      // than stepped like the d-pad repeat
+      const ry=gp.axes[3]||0;
+      if(Math.abs(ry)>SCROLL_DEAD){
+        const t=(Math.abs(ry)-SCROLL_DEAD)/(1-SCROLL_DEAD);
+        padScroll(Math.sign(ry)*t*t*SCROLL_MAX);
+      }
       if(dir){
         if(dir!==held){held=dir;nextNav=now+REPEAT_FIRST;nav(dir)}
         else if(now>=nextNav){nextNav=now+REPEAT_NEXT;nav(dir)}
