@@ -852,7 +852,17 @@ class PCCTests(unittest.TestCase):
             'PROTON_ENABLE_WAYLAND DXVK_HDR DXVK_ENABLE_NVAPI PROTON_USE_D7VK')
         vp.joinpath("proton").write_text('DXVK_ENABLE_NVAPI')
 
-        cap = pcc.proton_capabilities(root)
+        # _compat_dirs deliberately includes absolute system paths
+        # (~/.steam/root/..., /usr/share/steam/...) because real installs keep
+        # compat tools there. That makes this test read the developer's own
+        # machine unless it's pinned: it passed in a container with no Steam and
+        # failed on a real one, where actual builds leaked into the union.
+        real = pcc._compat_dirs
+        pcc._compat_dirs = lambda r: [Path(r) / "compatibilitytools.d"]
+        try:
+            cap = pcc.proton_capabilities(root)
+        finally:
+            pcc._compat_dirs = real
         # Keyed on the name Steam writes to CompatToolMapping, not the folder:
         # official builds get a slug ("Proton 11.0" -> proton_11), custom ones
         # use their own name. Verified against a real config.vdf.
@@ -907,6 +917,45 @@ class PCCTests(unittest.TestCase):
         self.assertIn("proton_experimental", names)
         self.assertNotIn("proton_9", names)     # not installed -> not offered
         self.assertNotIn("proton_10", names)
+
+    def test_shader_settings_excludes_per_game_sizes(self):
+        """ShaderCacheManager/App/<id>/ShaderCacheSize is a byte count Steam
+        records per game (8198563848 on a real config), not a setting. Matching
+        on the key name alone rendered 17 of them as checkboxes; flipping one
+        would write "1" into a size field and corrupt Steam's config. Only
+        genuine 0/1 settings outside the App subtree may be shown or written."""
+        root = Path(self.tmp.name) / "ss"
+        (root / "config").mkdir(parents=True)
+        apps = "".join('"%s" { "ShaderCacheSize" "%d" }\n' % (a, s)
+                       for a, s in [("553850", 8198563848),
+                                    ("1971870", 3446367914),
+                                    ("228980", 0)])
+        (root / "config/config.vdf").write_text(
+            '"InstallConfigStore"{"Software"{"Valve"{"Steam"'
+            '{"ShaderCacheManager"{"EnableShaderBackgroundProcessing" "1"\n'
+            '"App"{' + apps + '}}}}}}')
+
+        d = pcc.steam_shader_settings(root)
+        keys = [k for f in d["files"] for k in f["keys"]]
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(keys[0]["key"], "EnableShaderBackgroundProcessing")
+
+        # the sizes are still readable as a total, just never as switches
+        sizes = pcc.steam_shader_cache_sizes(root)
+        self.assertEqual(sizes["games"], 2)
+        self.assertEqual(sizes["total_bytes"], 8198563848 + 3446367914)
+
+        # and writing into that subtree must be refused outright
+        with self.assertRaises(RuntimeError):
+            pcc.set_steam_shader_setting(
+                root, str(root / "config/config.vdf"),
+                "InstallConfigStore/Software/Valve/Steam/ShaderCacheManager/"
+                "App/553850/ShaderCacheSize", "1")
+        with self.assertRaises(RuntimeError):
+            pcc.set_steam_shader_setting(
+                root, str(root / "config/config.vdf"),
+                "InstallConfigStore/Software/Valve/Steam/ShaderCacheManager/"
+                "EnableShaderBackgroundProcessing", "8198563848")
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.14.0"
+VERSION = "1.14.3"
 PORT = int(os.environ.get("PCC_PORT", "8686"))
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".local/share/proton-command-center"
@@ -645,14 +645,55 @@ def read_environment():
         return ""
 
 
+def _dir_size(p: Path) -> int:
+    total = 0
+    try:
+        for dirpath, _, filenames in os.walk(p):
+            for fn in filenames:
+                try:
+                    total += (Path(dirpath) / fn).stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def nvidia_cache_info() -> dict:
+    """Size of the driver's shader cache, redirected and default locations.
+
+    Both can hold data at once: the env vars only reach processes started after
+    a re-login, so anything already running (compositor, browser, Steam) keeps
+    writing to the default path until you log out. Bytes in the default dir
+    after enabling the redirect are stale, not a fault.
+    """
+    redirected = Path(SHADER_ENV_VARS["__GL_SHADER_DISK_CACHE_PATH"])
+    default = Path.home() / ".cache" / "nvidia"
+    return {
+        "path": str(redirected),
+        "size_bytes": _dir_size(redirected),
+        "exists": redirected.is_dir(),
+        "default_path": str(default),
+        "default_size_bytes": _dir_size(default) if default.is_dir() else 0,
+        "limit_bytes": int(SHADER_ENV_VARS["__GL_SHADER_DISK_CACHE_SIZE"]),
+    }
+
+
 def environment_shader_status() -> dict:
     txt = read_environment()
     present = {}
     for k in SHADER_ENV_VARS:
         m = re.search(rf"^{re.escape(k)}=(.*)$", txt, re.M)
         present[k] = m.group(1).strip().strip('"') if m else None
-    return {"enabled": all(present[k] is not None for k in SHADER_ENV_VARS),
-            "vars": present}
+    out = {"enabled": all(present[k] is not None for k in SHADER_ENV_VARS),
+           "vars": present}
+    out["cache"] = nvidia_cache_info()
+    out["steam_cache"] = None      # filled by the route, which knows the root
+    # the live ceiling is whatever /etc/environment says, not our default
+    cur = present.get("__GL_SHADER_DISK_CACHE_SIZE")
+    if cur and cur.isdigit():
+        out["cache"]["limit_bytes"] = int(cur)
+    return out
 
 
 def set_environment_shaders(enable) -> dict:
@@ -1857,8 +1898,11 @@ def cache_info(root: Path, appid: str):
                         files += 1
                     except OSError:
                         pass
-            foz = sorted(str(p) for p in c.rglob("*.foz"))
-            out.append({"path": str(c), "size_bytes": size, "files": files, "foz": foz})
+            # Only the count is ever used. This used to ship every .foz path -
+            # hundreds of strings per game - so the UI could call .length on it.
+            foz = sum(1 for _ in c.rglob("*.foz"))
+            out.append({"path": str(c), "size_bytes": size, "files": files,
+                        "foz": foz})
     return out
 
 
@@ -1986,9 +2030,21 @@ def shader_threads_status(root: Path) -> dict:
 
 
 def steam_shader_settings(root: Path) -> dict:
-    """Find every shader-related key Steam has written, across its configs.
+    """Steam's shader-related BOOLEAN settings, across its configs.
+
+    Two filters, both learned the hard way from real config data:
+
+    1. Skip the ShaderCacheManager/App/<appid>/ subtree. Those hold
+       ShaderCacheSize - a byte count per game, e.g. 8198563848 - which is
+       reported data, not a setting. Matching on the key name alone surfaced
+       17 of them as checkboxes; toggling one would have written "1" into a
+       size field and corrupted Steam's config.
+    2. Only keep values that are actually "0"/"1". Anything else isn't a
+       switch, whatever its name looks like.
+
     Steam only persists these once you've touched them, so an empty result
-    means 'still at defaults'."""
+    means 'still at defaults'.
+    """
     out = []
     candidates = [root / "config/config.vdf"] + list(find_localconfigs(root))
     for cfg in candidates:
@@ -1998,18 +2054,61 @@ def steam_shader_settings(root: Path) -> dict:
             data = vdf_parse(cfg.read_text(errors="replace"))
         except Exception:
             continue
-        keys = [{"path": "/".join(kp), "key": kp[-1], "value": val}
-                for kp, val in _walk_vdf(data)
-                if SHADER_KEY_RE.search(kp[-1])]
+        keys = []
+        for kp, val in _walk_vdf(data):
+            if not SHADER_KEY_RE.search(kp[-1]):
+                continue
+            if any(seg.lower() == "app" for seg in kp[:-1]):
+                continue                      # per-game data, not a setting
+            if str(val) not in ("0", "1"):
+                continue                      # not a switch
+            keys.append({"path": "/".join(kp), "key": kp[-1], "value": val})
         if keys:
             out.append({"file": str(cfg), "keys": keys})
     return {"files": out, "found": bool(out)}
+
+
+def steam_shader_cache_sizes(root: Path) -> dict:
+    """Steam's own per-game shader cache sizes, as it records them.
+
+    Same subtree the settings scan deliberately skips - useful as a total,
+    dangerous as toggles.
+    """
+    cfg = root / "config/config.vdf"
+    total, games = 0, 0
+    if cfg.is_file():
+        try:
+            data = vdf_parse(cfg.read_text(errors="replace"))
+            for kp, val in _walk_vdf(data):
+                if kp[-1].lower() != "shadercachesize":
+                    continue
+                if not any(seg.lower() == "app" for seg in kp[:-1]):
+                    continue
+                try:
+                    n = int(val)
+                except (TypeError, ValueError):
+                    continue
+                if n > 0:
+                    total += n
+                    games += 1
+        except Exception:
+            pass
+    return {"total_bytes": total, "games": games}
 
 
 def set_steam_shader_setting(root: Path, file, path, value, close_steam=False) -> dict:
     cfg = Path(file)
     if cfg.name not in ("config.vdf", "localconfig.vdf") or not cfg.is_file():
         raise RuntimeError("refusing to write an unexpected file")
+    # Belt and braces alongside the filter in steam_shader_settings: the
+    # ShaderCacheManager/App/<appid>/ subtree holds ShaderCacheSize byte counts,
+    # and writing a 0/1 into one would tell Steam a multi-GB cache is "1".
+    segs = [s.lower() for s in str(path).split("/")]
+    if "app" in segs[:-1]:
+        raise RuntimeError("refusing to write per-game shader cache data")
+    if str(value) not in ("0", "1"):
+        raise RuntimeError("shader settings are booleans; refusing to write "
+                           f"{value!r}")
     if steam_running():
         if close_steam:
             shutdown_steam()
@@ -2657,7 +2756,10 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/proton/list":
                 self._json(list_ge_proton())
             elif self.path == "/api/env/shaders":
-                self._json(environment_shader_status())
+                st = environment_shader_status()
+                if root:
+                    st["steam_cache"] = steam_shader_cache_sizes(root)
+                self._json(st)
             elif m := re.match(r"^/api/mangohud(?:\?(.*))?$", self.path):
                 qs = urllib.parse.parse_qs(m.group(1) or "")
                 preset = (qs.get("preset") or ["standard"])[0]
