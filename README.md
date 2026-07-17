@@ -7,11 +7,14 @@ Steam quietly uses a quarter of your cores.
 
 This puts all of it in one place, in your browser, on your machine.
 
+![Your Steam library, with status rails showing what's configured](assets/screenshots/library.png)
+
 ```
 http://localhost:8686
 ```
 
 Python standard library only. No dependencies, no telemetry, no account.
+
 
 ---
 
@@ -93,9 +96,12 @@ server-side. Skip them and everything else still works.
 
 ### Launch tab
 
+![Launch options built from toggles, with unsupported ones greyed out](assets/screenshots/launch.png)
+
 Compatibility tools are read from disk, so only builds you actually have are
 offered, and new releases show up on their own. Toggles cover DXVK, gamescope,
 HDR, native Wayland, Reflex, esync, and GE-only extras like D7VK and OptiScaler.
+
 
 Options that the selected build can't act on are greyed out with the reason. The
 check only greys what it can prove: it scans each build's launcher script, and a
@@ -109,13 +115,19 @@ one-click restart.
 
 ### DLSS tab
 
+![Every DLSS DLL in the game with its version, ready to swap or roll back](assets/screenshots/dlss.png)
+
 Every DLSS DLL in the game with its version. Swap in a newer one from your
 library, back up the original, roll back whenever. Requires an NVIDIA driver.
 
+
 ### Shader cache tab
+
+![Shader cache sizes, thread count, and Steam's own background processing](assets/screenshots/shaders.png)
 
 The headline number is what NVIDIA's shader cache is using against its ceiling,
 plus what Steam is holding separately - usually far more.
+
 
 **Thread count.** Steam uses only a fraction of your cores for its shader pass,
 which is why that screen can crawl on an idle machine. The override lives in
